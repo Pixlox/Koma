@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "example-staged-feed",
+  "name": "Example Staged Feed",
+  "version": "1.0.0",
+  "sourcePattern": "^https://serials\\.example/work/(?P<id>[0-9]+)$",
+  "requestUrl": "https://api.serials.example/works/$id",
+  "pageRequestUrl": "https://api.serials.example/entries/{/entryId}/pages",
+  "allowedRequestHosts": [
+    "api.serials.example"
+  ],
+  "allowedPageHosts": [
+    "media.serials.example"
+  ],
+  "capabilities": [
+    "chapter",
+    "series"
+  ],
+  "mapping": {
+    "title": "/work/title",
+    "language": "/work/language",
+    "chapters": "/work/entries",
+    "chapterNumber": "/number",
+    "pageResponsePages": "/data/pages",
+    "pageUrl": "/source"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "example-serial-feed",
+  "name": "Example Serial Feed",
+  "version": "1.0.0",
+  "description": "Imports an ordered image series from an authorized JSON feed.",
+  "sourcePattern": "^https://reader\\.example/series/(?P<slug>[a-z0-9-]+)$",
+  "requestUrl": "https://api.reader.example/v1/series/$slug",
+  "allowedRequestHosts": [
+    "api.reader.example"
+  ],
+  "allowedPageHosts": [
+    "images.reader.example",
+    "*.images.reader.example"
+  ],
+  "allowLocalNetwork": false,
+  "capabilities": [
+    "chapter",
+    "volume",
+    "series"
+  ],
+  "mapping": {
+    "title": "/data/title",
+    "language": "/data/language",
+    "chapters": "/data/entries",
+    "chapterNumber": "/number",
+    "chapterVolume": "/volume",
+    "chapterPages": "/pages",
+    "pageUrl": "/url",
+    "pageWidth": "/width",
+    "pageHeight": "/height"
+  }
+}

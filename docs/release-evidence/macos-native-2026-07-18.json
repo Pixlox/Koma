@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 2,
+  "recordedAt": "2026-07-18T14:06:13Z",
+  "platform": {
+    "os": "macOS",
+    "architecture": "arm64",
+    "binaryFormat": "Mach-O 64-bit executable arm64"
+  },
+  "artifacts": {
+    "app": {
+      "path": "target/release/bundle/macos/Koma.app",
+      "binaryBytes": 16495952,
+      "binarySha256": "c2175a015763a663df2fb313bd54e795e467c68d9769aebd7b4e65128fb631c1"
+    },
+    "dmg": {
+      "path": "target/release/bundle/dmg/Koma_0.1.0_aarch64.dmg",
+      "bytes": 7812082,
+      "sha256": "934dfa6eaf0d9068de94a1ccb6357b6b6df1701a6669ce57a7fe388082e43c59",
+      "hdiutilVerify": "valid",
+      "crc32": "D1477021"
+    }
+  },
+  "portability": {
+    "homebrewOrWorkspaceDynamicLibraries": [],
+    "dynamicLibraries": "Apple system frameworks and system libraries only",
+    "xzLinkage": "statically linked",
+    "localSigning": "linker ad-hoc; distribution signing and notarization require release credentials"
+  },
+  "bundleMetadata": {
+    "identifier": "me.pixlox.koma",
+    "version": "0.1.0",
+    "icon": {
+      "plistValue": "icon.icns",
+      "resourcePresent": true,
+      "resourceBytes": 37928,
+      "resourceSha256": "d33a3f212bf58599940c301549c4a9e986c3149182f4358a71fb502e5b733851",
+      "pixelSizes": [
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024
+      ],
+      "presentInMountedDmg": true
+    },
+    "fileAssociations": [
+      "cbz",
+      "cbr",
+      "cb7",
+      "cbt",
+      "epub",
+      "pdf"
+    ]
+  },
+  "nativeAcceptance": {
+    "launchedDmgExtractedApp": true,
+    "backend": "Tauri Rust backend",
+    "finalBundleHashMatchedBeforeAndAfterLaunch": true,
+    "realCbzOpened": true,
+    "largeLocalCbzRegression": {
+      "pageCount": 1285,
+      "outputBytes": 253465569,
+      "sha256": "7df157f6506c52828eca864235d70aa7d94328890965dd6609376137f195b7a2",
+      "spreadRendered": true,
+      "restoredPageTwo": true,
+      "navigatedToPageThree": true,
+      "progressPersisted": true,
+      "readerSettingsAccessible": true
+    },
+    "readerProgressQuickDrag": {
+      "startPage": 226,
+      "draggedPage": 310,
+      "restoredPage": 226,
+      "passed": true
+    },
+    "fullscreen": {
+      "toolbarButton": "passed",
+      "keyboardShortcut": "passed",
+      "macOsMode": "standard native fullscreen Space",
+      "nativeFullscreenApi": "setFullscreen",
+      "newSpaceBehavior": true,
+      "nativeWindowChromeHidden": true,
+      "fullscreenControlPressedState": true,
+      "pageNavigationKeptReaderChromeHidden": true,
+      "escapeExitedFullscreen": true,
+      "readerRemainedOpenAfterExit": true
+    },
+    "languages": {
+      "selectorPresent": true,
+      "choices": [
+        "System",
+        "English",
+        "日本語",
+        "Español"
+      ],
+      "userImportControlPresent": false
+    },
+    "mangaFireSeries": {
+      "pageCount": 435,
+      "reopenedByKoma": true,
+      "blake3": "e9269898c74f8bf6649edae61c84b76715496677ee1cef01f678aa965e7b7b73",
+      "sha256": "a45b384102e846c046422a4fa7437abb14287377e97ded2fe70d19a8ec952607",
+      "detailedRecord": "docs/release-evidence/mangafire-live-2026-07-18.json"
+    }
+  },
+  "localAdHocBoundary": {
+    "distributionSigned": false,
+    "notarized": false,
+    "note": "The local build is ad-hoc signed. A production Developer ID signature and notarization require the owner's release credentials."
+  },
+  "privacy": {
+    "comicPageScreenshotsCommittedToRepository": false,
+    "comicPageBytesCommittedToRepository": false,
+    "evidenceContainsOnlyBehaviorCountsAndHashes": true
+  }
+}

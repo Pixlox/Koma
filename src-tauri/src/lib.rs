@@ -1,0 +1,1103 @@
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use koma_core::{
+    BackupRestoreReport, Bookmark, ConnectorManifest, ConnectorSummary, ConversionOptions,
+    ConversionReport, DeclarativeImporter, ImportOptions, ImportPreview, ImportReceipt, KomaError,
+    Library, LibraryBackup, LibraryFolder, LibraryItem, LibraryScanReport, LinkImporter,
+    MangaFireImporter, PageData, PublicationFormat, PublicationInspection, PublicationManifest,
+    PublicationMetadata, PublicationReader, ReaderSettings, ReadingState,
+    bundled_mangafire_summary, convert_to_cbz, formats::with_metadata,
+    inspect_publication as inspect_path, open_publication, repair_to_cbz,
+    write_publication_metadata,
+};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, State};
+use uuid::Uuid;
+
+struct AppState {
+    library: Arc<Library>,
+    importer: Arc<MangaFireImporter>,
+    connectors: Mutex<Vec<Arc<DeclarativeImporter>>>,
+    connectors_directory: PathBuf,
+    readers: Mutex<HashMap<Uuid, Arc<dyn PublicationReader>>>,
+    pending_open_paths: Mutex<Vec<PathBuf>>,
+    default_import_directory: PathBuf,
+}
+
+impl AppState {
+    fn new(
+        database_path: &Path,
+        default_import_directory: PathBuf,
+        pending_open_paths: Vec<PathBuf>,
+    ) -> Result<Self, KomaError> {
+        let connectors_directory = database_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("connectors");
+        let connectors = load_connectors(&connectors_directory)?;
+        Ok(Self {
+            library: Arc::new(Library::open(database_path)?),
+            importer: Arc::new(MangaFireImporter::new()?),
+            connectors: Mutex::new(connectors),
+            connectors_directory,
+            readers: Mutex::new(HashMap::new()),
+            pending_open_paths: Mutex::new(pending_open_paths),
+            default_import_directory,
+        })
+    }
+
+    fn open_reader(
+        &self,
+        publication_id: Uuid,
+        password: Option<&str>,
+    ) -> Result<Arc<dyn PublicationReader>, KomaError> {
+        let item = self
+            .library
+            .get(publication_id)?
+            .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+        let mut reader = open_publication(&item.path, password)?;
+        if let Some(metadata) = self.library.metadata_override(publication_id)? {
+            reader = with_metadata(reader, metadata);
+        }
+        let reader: Arc<dyn PublicationReader> = Arc::from(reader);
+        self.readers
+            .lock()
+            .map_err(|_| KomaError::Other("the reader cache lock was poisoned".to_owned()))?
+            .insert(publication_id, Arc::clone(&reader));
+        Ok(reader)
+    }
+
+    fn cached_reader(&self, publication_id: Uuid) -> Result<Arc<dyn PublicationReader>, KomaError> {
+        self.readers
+            .lock()
+            .map_err(|_| KomaError::Other("the reader cache lock was poisoned".to_owned()))?
+            .get(&publication_id)
+            .cloned()
+            .ok_or_else(|| {
+                KomaError::Other("open this publication before requesting a page".to_owned())
+            })
+    }
+
+    fn importer_for(&self, source: &str) -> Result<Arc<dyn LinkImporter>, KomaError> {
+        if self.importer.recognizes(source) {
+            let importer: Arc<dyn LinkImporter> = self.importer.clone();
+            return Ok(importer);
+        }
+        let connectors = self
+            .connectors
+            .lock()
+            .map_err(|_| KomaError::Other("the connector registry lock was poisoned".to_owned()))?;
+        connectors
+            .iter()
+            .find(|connector| connector.recognizes(source))
+            .cloned()
+            .map(|connector| connector as Arc<dyn LinkImporter>)
+            .ok_or_else(|| {
+                KomaError::UnsupportedFormat(
+                    "no installed connector recognizes this link".to_owned(),
+                )
+            })
+    }
+}
+
+fn load_connector(path: &Path) -> Result<Arc<DeclarativeImporter>, KomaError> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return Err(KomaError::ImportDenied(
+            "connector package must be a file smaller than 1 MiB".to_owned(),
+        ));
+    }
+    let manifest = ConnectorManifest::from_json(&std::fs::read(path)?)?;
+    if manifest.id == "mangafire" {
+        return Err(KomaError::ImportDenied(
+            "the bundled MangaFire connector cannot be replaced".to_owned(),
+        ));
+    }
+    Ok(Arc::new(DeclarativeImporter::new(manifest)?))
+}
+
+fn load_connectors(directory: &Path) -> Result<Vec<Arc<DeclarativeImporter>>, KomaError> {
+    std::fs::create_dir_all(directory)?;
+    let mut connectors = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".koma-connector.json"))
+        {
+            continue;
+        }
+        match load_connector(&path) {
+            Ok(connector) => connectors.push(connector),
+            Err(error) => eprintln!(
+                "Koma skipped invalid connector package {}: {error}",
+                path.display()
+            ),
+        }
+    }
+    connectors.sort_by(|left, right| {
+        left.manifest()
+            .name
+            .to_lowercase()
+            .cmp(&right.manifest().name.to_lowercase())
+    });
+    Ok(connectors)
+}
+
+fn open_paths_from_arguments(arguments: &[String], working_directory: &Path) -> Vec<PathBuf> {
+    arguments
+        .iter()
+        .filter_map(|argument| {
+            if argument.starts_with('-') {
+                return None;
+            }
+            let path = if argument.starts_with("file:") {
+                url::Url::parse(argument).ok()?.to_file_path().ok()?
+            } else {
+                PathBuf::from(argument)
+            };
+            let path = if path.is_absolute() {
+                path
+            } else {
+                working_directory.join(path)
+            };
+            if !path.exists() || (!path.is_dir() && PublicationFormat::from_path(&path).is_none()) {
+                return None;
+            }
+            Some(path.canonicalize().unwrap_or(path))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn queue_open_paths(app: &AppHandle, paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+    let state = app.state::<AppState>();
+    if let Ok(mut pending) = state.pending_open_paths.lock() {
+        for path in paths {
+            if !pending.contains(&path) {
+                pending.push(path);
+            }
+        }
+    }
+    let _ = app.emit("koma://open-paths", ());
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandError {
+    code: &'static str,
+    message: String,
+    recoverable: bool,
+}
+
+impl From<KomaError> for CommandError {
+    fn from(error: KomaError) -> Self {
+        let (code, recoverable) = match &error {
+            KomaError::ImportDenied(_) => ("import_denied", true),
+            KomaError::ProviderUnavailable(_) => ("provider_unavailable", true),
+            KomaError::ProviderChanged(_) => ("provider_changed", false),
+            KomaError::PasswordRequired => ("password_required", true),
+            KomaError::MissingSource(_) => ("missing_source", true),
+            KomaError::UnsupportedFormat(_) => ("unsupported_format", true),
+            KomaError::EmptyPublication => ("empty_publication", true),
+            KomaError::PageOutOfRange { .. } => ("page_out_of_range", true),
+            KomaError::UnsafeArchiveEntry(_)
+            | KomaError::PageTooLarge { .. }
+            | KomaError::InvalidImage(_) => ("unsafe_publication", false),
+            KomaError::Cancelled => ("cancelled", true),
+            KomaError::Database(_)
+            | KomaError::Io(_)
+            | KomaError::Zip(_)
+            | KomaError::Rar(_)
+            | KomaError::SevenZip(_)
+            | KomaError::Pdf(_)
+            | KomaError::Metadata(_)
+            | KomaError::MetadataWrite(_)
+            | KomaError::Network(_)
+            | KomaError::Url(_)
+            | KomaError::Other(_) => ("operation_failed", true),
+        };
+        Self {
+            code,
+            message: error.to_string(),
+            recoverable,
+        }
+    }
+}
+
+impl From<std::io::Error> for CommandError {
+    fn from(error: std::io::Error) -> Self {
+        KomaError::Io(error).into()
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapPayload {
+    items: Vec<LibraryItem>,
+    default_import_directory: PathBuf,
+    default_reader_settings: ReaderSettings,
+    import_warning: &'static str,
+    app_version: &'static str,
+    platform: &'static str,
+    supported_formats: [&'static str; 7],
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReaderOpenPayload {
+    library_id: Uuid,
+    manifest: PublicationManifest,
+    reading_state: Option<ReadingState>,
+    bookmarks: Vec<Bookmark>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PagePayload {
+    index: usize,
+    mime_type: String,
+    data_url: String,
+}
+
+impl From<PageData> for PagePayload {
+    fn from(page: PageData) -> Self {
+        Self {
+            index: page.index,
+            data_url: format!(
+                "data:{};base64,{}",
+                page.mime_type,
+                STANDARD.encode(page.bytes)
+            ),
+            mime_type: page.mime_type,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkImportResult {
+    receipt: ImportReceipt,
+    item: LibraryItem,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicationOperationResult {
+    report: ConversionReport,
+    item: LibraryItem,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetadataSaveResult {
+    item: LibraryItem,
+    backup_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryFolderScanResult {
+    folder: LibraryFolder,
+    report: LibraryScanReport,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorPackagePreview {
+    connector: ConnectorSummary,
+    allowed_request_hosts: Vec<String>,
+    allowed_page_hosts: Vec<String>,
+    allow_local_network: bool,
+}
+
+#[tauri::command]
+fn bootstrap(state: State<'_, AppState>) -> Result<BootstrapPayload, CommandError> {
+    state.library.refresh_missing_flags()?;
+    Ok(BootstrapPayload {
+        items: state.library.list(true, None)?,
+        default_import_directory: state.default_import_directory.clone(),
+        default_reader_settings: ReaderSettings::default(),
+        import_warning: koma_core::importer::IMPORT_WARNING,
+        app_version: env!("CARGO_PKG_VERSION"),
+        platform: std::env::consts::OS,
+        supported_formats: [
+            "CBZ/ZIP", "CBR/RAR", "CB7/7z", "CBT/TAR", "Folder", "EPUB", "PDF",
+        ],
+    })
+}
+
+#[tauri::command]
+fn list_library(
+    state: State<'_, AppState>,
+    include_hidden: bool,
+    search: Option<String>,
+) -> Result<Vec<LibraryItem>, CommandError> {
+    Ok(state.library.list(include_hidden, search.as_deref())?)
+}
+
+#[tauri::command]
+fn take_open_paths(state: State<'_, AppState>) -> Result<Vec<PathBuf>, CommandError> {
+    let mut pending = state
+        .pending_open_paths
+        .lock()
+        .map_err(|_| KomaError::Other("the open-file queue lock was poisoned".to_owned()))?;
+    Ok(std::mem::take(&mut *pending))
+}
+
+#[tauri::command]
+async fn add_publication(
+    state: State<'_, AppState>,
+    path: PathBuf,
+    password: Option<String>,
+) -> Result<LibraryItem, CommandError> {
+    let library = Arc::clone(&state.library);
+    tauri::async_runtime::spawn_blocking(move || library.import_path(path, password.as_deref()))
+        .await
+        .map_err(|error| CommandError {
+            code: "operation_failed",
+            message: format!("file import task failed: {error}"),
+            recoverable: true,
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn relink_publication(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    path: PathBuf,
+    password: Option<String>,
+) -> Result<LibraryItem, CommandError> {
+    let library = Arc::clone(&state.library);
+    let item = tauri::async_runtime::spawn_blocking(move || {
+        library.relink(publication_id, path, password.as_deref())
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("relink task failed: {error}"),
+        recoverable: true,
+    })??;
+    state
+        .readers
+        .lock()
+        .map_err(|_| KomaError::Other("the reader cache lock was poisoned".to_owned()))?
+        .remove(&publication_id);
+    Ok(item)
+}
+
+#[tauri::command]
+async fn scan_folder(
+    state: State<'_, AppState>,
+    path: PathBuf,
+) -> Result<koma_core::library::LibraryScanReport, CommandError> {
+    let library = Arc::clone(&state.library);
+    tauri::async_runtime::spawn_blocking(move || library.scan_folder(path))
+        .await
+        .map_err(|error| CommandError {
+            code: "operation_failed",
+            message: format!("library scan task failed: {error}"),
+            recoverable: true,
+        })?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn list_library_folders(state: State<'_, AppState>) -> Result<Vec<LibraryFolder>, CommandError> {
+    Ok(state.library.library_folders()?)
+}
+
+#[tauri::command]
+async fn add_library_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: PathBuf,
+    scan_interval_minutes: u32,
+) -> Result<LibraryFolderScanResult, CommandError> {
+    let library = Arc::clone(&state.library);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let folder = library.add_library_folder(path, scan_interval_minutes)?;
+        scan_registered_folder(&library, &folder)
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("library folder task failed: {error}"),
+        recoverable: true,
+    })??;
+    let _ = app.emit("koma://library-changed", ());
+    Ok(result)
+}
+
+#[tauri::command]
+fn update_library_folder(
+    state: State<'_, AppState>,
+    folder_id: Uuid,
+    enabled: bool,
+    scan_interval_minutes: u32,
+) -> Result<LibraryFolder, CommandError> {
+    Ok(state
+        .library
+        .update_library_folder(folder_id, enabled, scan_interval_minutes)?)
+}
+
+#[tauri::command]
+fn remove_library_folder(
+    state: State<'_, AppState>,
+    folder_id: Uuid,
+) -> Result<bool, CommandError> {
+    Ok(state.library.remove_library_folder(folder_id)?)
+}
+
+#[tauri::command]
+async fn scan_library_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    folder_id: Uuid,
+) -> Result<LibraryFolderScanResult, CommandError> {
+    let library = Arc::clone(&state.library);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let folder = library
+            .library_folders()?
+            .into_iter()
+            .find(|folder| folder.id == folder_id)
+            .ok_or_else(|| KomaError::Other("library folder was not found".to_owned()))?;
+        scan_registered_folder(&library, &folder)
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("library folder scan task failed: {error}"),
+        recoverable: true,
+    })??;
+    let _ = app.emit("koma://library-changed", ());
+    Ok(result)
+}
+
+#[tauri::command]
+fn remove_from_library(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+) -> Result<bool, CommandError> {
+    state
+        .readers
+        .lock()
+        .map_err(|_| CommandError {
+            code: "operation_failed",
+            message: "the reader cache lock was poisoned".to_owned(),
+            recoverable: true,
+        })?
+        .remove(&publication_id);
+    Ok(state.library.remove(publication_id)?)
+}
+
+#[tauri::command]
+fn set_hidden(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    hidden: bool,
+) -> Result<bool, CommandError> {
+    Ok(state.library.set_hidden(publication_id, hidden)?)
+}
+
+#[tauri::command]
+fn set_favorite(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    favorite: bool,
+) -> Result<bool, CommandError> {
+    Ok(state.library.set_favorite(publication_id, favorite)?)
+}
+
+#[tauri::command]
+fn set_reading_status(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    completed: bool,
+) -> Result<ReadingState, CommandError> {
+    Ok(state
+        .library
+        .set_reading_status(publication_id, completed)?)
+}
+
+#[tauri::command]
+async fn open_reader(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    password: Option<String>,
+) -> Result<ReaderOpenPayload, CommandError> {
+    let item = state
+        .library
+        .get(publication_id)?
+        .ok_or_else(|| CommandError {
+            code: "missing_source",
+            message: "publication is not in the library".to_owned(),
+            recoverable: true,
+        })?;
+    if item.is_missing {
+        return Err(CommandError {
+            code: "missing_source",
+            message: format!("the source file is missing: {}", item.path.display()),
+            recoverable: true,
+        });
+    }
+    let reader = state.open_reader(publication_id, password.as_deref())?;
+    if reader.manifest().format == koma_core::PublicationFormat::Pdf {
+        app.asset_protocol_scope()
+            .allow_file(&reader.manifest().path)
+            .map_err(|error| CommandError {
+                code: "operation_failed",
+                message: format!("could not grant PDF read access: {error}"),
+                recoverable: true,
+            })?;
+    }
+    Ok(ReaderOpenPayload {
+        library_id: publication_id,
+        manifest: reader.manifest().clone(),
+        reading_state: state.library.reading_state(publication_id)?,
+        bookmarks: state.library.bookmarks(publication_id)?,
+    })
+}
+
+#[tauri::command]
+async fn read_page(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    page_index: usize,
+) -> Result<PagePayload, CommandError> {
+    let reader = state.cached_reader(publication_id)?;
+    tauri::async_runtime::spawn_blocking(move || reader.read_page(page_index))
+        .await
+        .map_err(|error| CommandError {
+            code: "operation_failed",
+            message: format!("page read task failed: {error}"),
+            recoverable: true,
+        })?
+        .map(PagePayload::from)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn save_progress(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    current_page: usize,
+    settings: Option<ReaderSettings>,
+) -> Result<ReadingState, CommandError> {
+    Ok(state
+        .library
+        .save_progress(publication_id, current_page, settings.as_ref())?)
+}
+
+#[tauri::command]
+fn add_bookmark(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    page_index: usize,
+    label: Option<String>,
+    note: Option<String>,
+) -> Result<Bookmark, CommandError> {
+    Ok(state.library.add_bookmark(
+        publication_id,
+        page_index,
+        label.as_deref(),
+        note.as_deref(),
+    )?)
+}
+
+#[tauri::command]
+fn update_bookmark(
+    state: State<'_, AppState>,
+    bookmark_id: Uuid,
+    label: Option<String>,
+    note: Option<String>,
+) -> Result<Bookmark, CommandError> {
+    Ok(state
+        .library
+        .update_bookmark(bookmark_id, label.as_deref(), note.as_deref())?)
+}
+
+#[tauri::command]
+fn remove_bookmark(state: State<'_, AppState>, bookmark_id: Uuid) -> Result<bool, CommandError> {
+    Ok(state.library.remove_bookmark(bookmark_id)?)
+}
+
+#[tauri::command]
+fn list_connectors(state: State<'_, AppState>) -> Result<Vec<ConnectorSummary>, CommandError> {
+    let connectors = state
+        .connectors
+        .lock()
+        .map_err(|_| KomaError::Other("the connector registry lock was poisoned".to_owned()))?;
+    let mut summaries = Vec::with_capacity(connectors.len() + 1);
+    summaries.push(bundled_mangafire_summary());
+    summaries.extend(
+        connectors
+            .iter()
+            .map(|connector| connector.manifest().summary()),
+    );
+    Ok(summaries)
+}
+
+#[tauri::command]
+fn inspect_connector_package(path: PathBuf) -> Result<ConnectorPackagePreview, CommandError> {
+    let connector = load_connector(&path)?;
+    let manifest = connector.manifest();
+    Ok(ConnectorPackagePreview {
+        connector: manifest.summary(),
+        allowed_request_hosts: manifest.allowed_request_hosts.clone(),
+        allowed_page_hosts: manifest.allowed_page_hosts.clone(),
+        allow_local_network: manifest.allow_local_network,
+    })
+}
+
+#[tauri::command]
+fn install_connector_package(
+    state: State<'_, AppState>,
+    path: PathBuf,
+) -> Result<ConnectorSummary, CommandError> {
+    let connector = load_connector(&path)?;
+    let manifest = connector.manifest();
+    let summary = manifest.summary();
+    std::fs::create_dir_all(&state.connectors_directory)?;
+    let destination = state
+        .connectors_directory
+        .join(format!("{}.koma-connector.json", manifest.id));
+    let temporary =
+        state
+            .connectors_directory
+            .join(format!(".{}.{}.tmp", manifest.id, Uuid::now_v7()));
+    std::fs::write(&temporary, std::fs::read(&path)?)?;
+
+    let previous = state
+        .connectors_directory
+        .join(format!(".{}.previous", manifest.id));
+    if previous.exists() {
+        std::fs::remove_file(&previous)?;
+    }
+    if destination.exists() {
+        std::fs::rename(&destination, &previous)?;
+    }
+    if let Err(error) = std::fs::rename(&temporary, &destination) {
+        if previous.exists() {
+            let _ = std::fs::rename(&previous, &destination);
+        }
+        return Err(error.into());
+    }
+    if previous.exists() {
+        std::fs::remove_file(previous)?;
+    }
+
+    let mut connectors = state
+        .connectors
+        .lock()
+        .map_err(|_| KomaError::Other("the connector registry lock was poisoned".to_owned()))?;
+    connectors.retain(|existing| existing.manifest().id != manifest.id);
+    connectors.push(connector);
+    connectors.sort_by(|left, right| {
+        left.manifest()
+            .name
+            .to_lowercase()
+            .cmp(&right.manifest().name.to_lowercase())
+    });
+    Ok(summary)
+}
+
+#[tauri::command]
+fn remove_connector(
+    state: State<'_, AppState>,
+    connector_id: String,
+) -> Result<bool, CommandError> {
+    if connector_id == "mangafire" {
+        return Err(KomaError::ImportDenied(
+            "the bundled MangaFire connector cannot be removed".to_owned(),
+        )
+        .into());
+    }
+    let mut connectors = state
+        .connectors
+        .lock()
+        .map_err(|_| KomaError::Other("the connector registry lock was poisoned".to_owned()))?;
+    let installed = connectors
+        .iter()
+        .any(|connector| connector.manifest().id == connector_id);
+    if !installed {
+        return Ok(false);
+    }
+    let destination = state
+        .connectors_directory
+        .join(format!("{connector_id}.koma-connector.json"));
+    if destination.exists() {
+        std::fs::remove_file(destination)?;
+    }
+    connectors.retain(|connector| connector.manifest().id != connector_id);
+    Ok(true)
+}
+
+#[tauri::command]
+async fn preview_link(
+    state: State<'_, AppState>,
+    source: String,
+) -> Result<ImportPreview, CommandError> {
+    let importer = state.importer_for(&source)?;
+    importer.preview(&source).await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn import_link(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source: String,
+    options: ImportOptions,
+) -> Result<LinkImportResult, CommandError> {
+    let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let event_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = event_receiver.recv().await {
+            let _ = event_app.emit("koma://import-event", event);
+        }
+    });
+
+    let importer = state.importer_for(&source)?;
+    let receipt = importer
+        .import(&source, &options, Some(&event_sender))
+        .await?;
+    drop(event_sender);
+    state.library.save_import_receipt(&receipt)?;
+    let item = state.library.import_path(&receipt.output_path, None)?;
+    Ok(LinkImportResult { receipt, item })
+}
+
+#[tauri::command]
+async fn export_library_backup(
+    state: State<'_, AppState>,
+    destination: PathBuf,
+) -> Result<PathBuf, CommandError> {
+    let library = Arc::clone(&state.library);
+    let destination_for_task = destination.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), KomaError> {
+        let backup = library.export_backup()?;
+        let bytes = serde_json::to_vec_pretty(&backup)
+            .map_err(|error| KomaError::Other(format!("could not serialize backup: {error}")))?;
+        let temporary = destination_for_task.with_extension("koma-backup.tmp");
+        std::fs::write(&temporary, bytes)?;
+        if destination_for_task.exists() {
+            let previous = destination_for_task.with_extension("koma-backup.previous");
+            if previous.exists() {
+                std::fs::remove_file(&previous)?;
+            }
+            std::fs::rename(&destination_for_task, &previous)?;
+        }
+        if let Err(error) = std::fs::rename(&temporary, &destination_for_task) {
+            let previous = destination_for_task.with_extension("koma-backup.previous");
+            if previous.exists() {
+                let _ = std::fs::rename(previous, &destination_for_task);
+            }
+            return Err(error.into());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("backup task failed: {error}"),
+        recoverable: true,
+    })??;
+    Ok(destination)
+}
+
+#[tauri::command]
+async fn restore_library_backup(
+    state: State<'_, AppState>,
+    source: PathBuf,
+) -> Result<BackupRestoreReport, CommandError> {
+    let library = Arc::clone(&state.library);
+    tauri::async_runtime::spawn_blocking(move || {
+        let metadata = std::fs::metadata(&source)?;
+        if metadata.len() > 64 * 1024 * 1024 {
+            return Err(KomaError::Other(
+                "the backup exceeds Koma's 64 MiB safety limit".to_owned(),
+            ));
+        }
+        let bytes = std::fs::read(source)?;
+        let backup: LibraryBackup = serde_json::from_slice(&bytes)
+            .map_err(|error| KomaError::Other(format!("invalid Koma backup: {error}")))?;
+        library.restore_backup(&backup)
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("backup restore task failed: {error}"),
+        recoverable: true,
+    })?
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn inspect_library_publication(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    password: Option<String>,
+) -> Result<PublicationInspection, CommandError> {
+    let item = state
+        .library
+        .get(publication_id)?
+        .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+    let override_metadata = state.library.metadata_override(publication_id)?;
+    let mut inspection =
+        tauri::async_runtime::spawn_blocking(move || inspect_path(&item.path, password.as_deref()))
+            .await
+            .map_err(|error| CommandError {
+                code: "operation_failed",
+                message: format!("inspection task failed: {error}"),
+                recoverable: true,
+            })??;
+    if let Some(metadata) = override_metadata {
+        inspection.metadata = metadata;
+    }
+    Ok(inspection)
+}
+
+#[tauri::command]
+async fn convert_library_publication(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    destination: PathBuf,
+    password: Option<String>,
+    options: ConversionOptions,
+) -> Result<PublicationOperationResult, CommandError> {
+    let item = state
+        .library
+        .get(publication_id)?
+        .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        convert_to_cbz(&item.path, &destination, password.as_deref(), &options)
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("conversion task failed: {error}"),
+        recoverable: true,
+    })??;
+    let item = state.library.import_path(&report.output_path, None)?;
+    Ok(PublicationOperationResult { report, item })
+}
+
+#[tauri::command]
+async fn repair_library_publication(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    destination: PathBuf,
+    password: Option<String>,
+) -> Result<PublicationOperationResult, CommandError> {
+    let item = state
+        .library
+        .get(publication_id)?
+        .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        repair_to_cbz(&item.path, &destination, password.as_deref())
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("repair task failed: {error}"),
+        recoverable: true,
+    })??;
+    let item = state.library.import_path(&report.output_path, None)?;
+    Ok(PublicationOperationResult { report, item })
+}
+
+#[tauri::command]
+async fn save_publication_metadata(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    metadata: PublicationMetadata,
+    write_to_source: bool,
+) -> Result<MetadataSaveResult, CommandError> {
+    let item = state
+        .library
+        .get(publication_id)?
+        .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+    let backup_path = if write_to_source {
+        let path = item.path;
+        let source_metadata = metadata.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            write_publication_metadata(&path, &source_metadata)
+        })
+        .await
+        .map_err(|error| CommandError {
+            code: "operation_failed",
+            message: format!("metadata write task failed: {error}"),
+            recoverable: true,
+        })??
+    } else {
+        None
+    };
+    let item = state
+        .library
+        .save_metadata_override(publication_id, &metadata)?;
+    state
+        .readers
+        .lock()
+        .map_err(|_| KomaError::Other("the reader cache lock was poisoned".to_owned()))?
+        .remove(&publication_id);
+    Ok(MetadataSaveResult { item, backup_path })
+}
+
+fn setup_state(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let data_directory = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&data_directory)?;
+    let default_import_directory = app
+        .path()
+        .download_dir()
+        .unwrap_or_else(|_| data_directory.join("Imports"))
+        .join("Koma");
+    let working_directory = std::env::current_dir().unwrap_or_else(|_| data_directory.clone());
+    let arguments = std::env::args().collect::<Vec<_>>();
+    let pending_open_paths = open_paths_from_arguments(&arguments, &working_directory);
+    let state = AppState::new(
+        &data_directory.join("library.sqlite3"),
+        default_import_directory,
+        pending_open_paths,
+    )?;
+    let library = Arc::clone(&state.library);
+    let app_handle = app.handle().clone();
+    app.manage(state);
+    tauri::async_runtime::spawn(async move {
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            timer.tick().await;
+            let library_for_scan = Arc::clone(&library);
+            let due = tauri::async_runtime::spawn_blocking(move || {
+                library_for_scan.due_library_folders(chrono::Utc::now())
+            })
+            .await;
+            let Ok(Ok(folders)) = due else {
+                continue;
+            };
+            for folder in folders {
+                let library_for_scan = Arc::clone(&library);
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    scan_registered_folder(&library_for_scan, &folder)
+                })
+                .await;
+                if matches!(result, Ok(Ok(_))) {
+                    let _ = app_handle.emit("koma://library-changed", ());
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+fn scan_registered_folder(
+    library: &Library,
+    folder: &LibraryFolder,
+) -> Result<LibraryFolderScanResult, KomaError> {
+    match library.scan_folder(&folder.path) {
+        Ok(report) => {
+            library.record_library_folder_scan(folder.id, Some(&report), None)?;
+            let updated = library
+                .library_folders()?
+                .into_iter()
+                .find(|candidate| candidate.id == folder.id)
+                .ok_or_else(|| KomaError::Other("library folder was not found".to_owned()))?;
+            Ok(LibraryFolderScanResult {
+                folder: updated,
+                report,
+            })
+        }
+        Err(error) => {
+            library.record_library_folder_scan(folder.id, None, Some(&error.to_string()))?;
+            Err(error)
+        }
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init())
+            .plugin(tauri_plugin_single_instance::init(
+                |app, arguments, working_directory| {
+                    let paths =
+                        open_paths_from_arguments(&arguments, Path::new(&working_directory));
+                    queue_open_paths(app, paths);
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                },
+            ));
+    }
+
+    builder
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .setup(setup_state)
+        .invoke_handler(tauri::generate_handler![
+            bootstrap,
+            list_library,
+            take_open_paths,
+            add_publication,
+            relink_publication,
+            scan_folder,
+            list_library_folders,
+            add_library_folder,
+            update_library_folder,
+            remove_library_folder,
+            scan_library_folder,
+            remove_from_library,
+            set_hidden,
+            set_favorite,
+            set_reading_status,
+            open_reader,
+            read_page,
+            save_progress,
+            add_bookmark,
+            update_bookmark,
+            remove_bookmark,
+            list_connectors,
+            inspect_connector_package,
+            install_connector_package,
+            remove_connector,
+            preview_link,
+            import_link,
+            export_library_backup,
+            restore_library_backup,
+            inspect_library_publication,
+            convert_library_publication,
+            repair_library_publication,
+            save_publication_metadata,
+        ])
+        .build(tauri::generate_context!())
+        .expect("Koma could not start")
+        .run(|app, event| {
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+            if let tauri::RunEvent::Opened { urls } = event {
+                let paths = urls
+                    .into_iter()
+                    .filter_map(|url| url.to_file_path().ok())
+                    .filter(|path| path.is_dir() || PublicationFormat::from_path(path).is_some())
+                    .collect();
+                queue_open_paths(app, paths);
+            }
+        });
+}

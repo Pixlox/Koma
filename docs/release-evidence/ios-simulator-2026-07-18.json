@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-07-18T07:01:24Z",
+  "toolchain": {
+    "rust": "1.93.0",
+    "xcode": "26.2 (17C52)",
+    "target": "aarch64-apple-ios-sim",
+    "runtime": "iOS 18.0"
+  },
+  "artifact": {
+    "path": "src-tauri/gen/apple/build/arm64-sim/Koma.app",
+    "size": "155 MiB debug",
+    "format": "Mach-O 64-bit executable arm64",
+    "executableSha256": "d2a3375bbc2bd145085854d63ed0b5accf2a7b95ae85c2dc2c6c4898cb97c13a",
+    "bundleIdentifier": "me.pixlox.koma",
+    "version": "0.1.0",
+    "minimumOsVersion": "14.0",
+    "deviceFamilies": [
+      "iPhone",
+      "iPad"
+    ],
+    "distributionSigned": false
+  },
+  "documentPolicy": {
+    "pickerAccessMode": "copy",
+    "supportsOpeningDocumentsInPlace": false,
+    "fileSharingEnabled": true,
+    "purpose": "Files selected on iOS are copied into Koma-owned storage instead of relying on a temporary external security scope."
+  },
+  "runtimeAcceptance": [
+    {
+      "device": "iPhone 16 Pro",
+      "udid": "D0D50906-5609-4746-9645-F9356F5C0A15",
+      "installed": true,
+      "launched": true,
+      "result": "Compact search toolbar, empty-library actions, safe-area-aware bottom navigation, and local-library state rendered without clipping or horizontal overflow.",
+      "screenshot": {
+        "path": "docs/release-evidence/screenshots/ios-iphone-library.png",
+        "pixels": "1206x2622",
+        "sha256": "0ff0c97093f2503acaeaf42b3d0a223c6f47b3488491707067402cfe887a2b7e"
+      }
+    },
+    {
+      "device": "iPad Pro 11-inch (M4)",
+      "udid": "937A1C8F-D15C-479C-82DB-02C6BC423452",
+      "installed": true,
+      "launched": true,
+      "result": "Wide sidebar, desktop-class toolbar, empty-library actions, and local-library state rendered without clipping or horizontal overflow.",
+      "screenshot": {
+        "path": "docs/release-evidence/screenshots/ios-ipad-library.png",
+        "pixels": "1668x2420",
+        "sha256": "a1a161d12c54f40fea5c4abb7ca62fe8604fd38b86d5862dca65afc158d7248a"
+      }
+    }
+  ],
+  "privacy": {
+    "comicContentLoaded": false,
+    "comicPageScreenshotsCommittedToRepository": false
+  },
+  "remainingReleaseBoundary": [
+    "A physical iPhone or iPad was not tested.",
+    "App Store signing, provisioning, and submission require the owner's Apple release credentials."
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-07-18T13:59:03Z",
+  "adapterVersion": "mangafire-api-2026.07-chapter-series.2",
+  "source": {
+    "provider": "MangaFire",
+    "url": "https://mangafire.to/title/zknp-the-angel-next-door-spoils-me-rotten",
+    "status": 200,
+    "title": "The Angel Next Door Spoils Me Rotten",
+    "selectedLanguage": "en"
+  },
+  "preview": {
+    "officialChapterCount": 120,
+    "selectedChapterId": 9022334,
+    "selectedChapterNumber": 26.4,
+    "availableScopes": [
+      "chapter",
+      "volume",
+      "series"
+    ]
+  },
+  "largeSeriesProbe": {
+    "metadataResolutionCompleted": true,
+    "resolvedPageCount": 2043,
+    "downloadedPagesObserved": 375,
+    "rateLimitErrorObserved": false,
+    "completed": false,
+    "stopReason": "deliberately stopped after proving the reported metadata burst and sustained page download path"
+  },
+  "chapterResult": {
+    "completed": true,
+    "chapterId": 9022334,
+    "chapterNumber": 26.4,
+    "reopenedByKoma": true,
+    "format": "cbz",
+    "pageCount": 12,
+    "outputBytes": 8776844,
+    "blake3": "9ff132d19197070fa337c4fa81b0599ce633ef58561c7fc57efdfff62d960c4a",
+    "sampledPages": [
+      {
+        "index": 0,
+        "mimeType": "image/jpeg",
+        "byteSize": 776035,
+        "blake3": "5d680e74a31ef2eb227b782cf4fa76f9e5c653feb32aa2bb747f83b188e71718"
+      },
+      {
+        "index": 6,
+        "mimeType": "image/jpeg",
+        "byteSize": 671303,
+        "blake3": "dc2cce6e4ccd9f5c9df5b80f3cf8e9f2bd024843313499d29bf52e1aedd3e2b2"
+      },
+      {
+        "index": 11,
+        "mimeType": "image/jpeg",
+        "byteSize": 698981,
+        "blake3": "9db70308f044c65cac48e3f146b047ebb63d42a104562dbbc9072af2ca6d8da5"
+      }
+    ]
+  },
+  "temporaryRateLimitTest": {
+    "firstResponse": 429,
+    "retryAfterSeconds": 0,
+    "secondResponse": 200,
+    "passed": true
+  },
+  "privacy": {
+    "comicBytesCommittedToRepository": false,
+    "pageBytesCommittedToRepository": false,
+    "evidenceContainsOnlyMetadataCountsAndHashes": true
+  }
+}

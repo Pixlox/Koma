@@ -1,0 +1,14 @@
+{
+  "$schema": "../language.schema.json",
+  "schemaVersion": 1,
+  "locale": "fr",
+  "name": "French",
+  "nativeName": "Français",
+  "translations": {
+    "About": "À propos",
+    "Library": "Bibliothèque",
+    "Page {{current}} of {{total}}": "Page {{current}} sur {{total}}",
+    "Settings": "Réglages"
+  }
+}
+

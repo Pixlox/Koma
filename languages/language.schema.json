@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Pixlox/Koma/blob/main/languages/language.schema.json",
+  "title": "Koma bundled locale",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "locale",
+    "name",
+    "nativeName",
+    "translations"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "locale": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 35
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "nativeName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "translations": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 2000,
+      "propertyNames": {
+        "minLength": 1,
+        "maxLength": 240
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 2000
+      }
+    }
+  }
+}

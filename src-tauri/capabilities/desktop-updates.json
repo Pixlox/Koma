@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-updates",
+  "description": "Allows signed update checks and restarts on desktop builds.",
+  "windows": ["main"],
+  "platforms": ["macOS", "windows", "linux"],
+  "permissions": ["process:allow-restart", "updater:default"]
+}

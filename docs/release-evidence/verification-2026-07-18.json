@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 2,
+  "recordedAt": "2026-07-18T12:35:39Z",
+  "host": {
+    "os": "macOS",
+    "architecture": "arm64",
+    "node": "20.17.0",
+    "npm": "10.3.0",
+    "rustc": "1.94.0 (4a4ef493e 2026-03-02)",
+    "cargo": "1.94.0 (85eff7c80 2026-01-15)"
+  },
+  "frontend": {
+    "npmAudit": {
+      "result": "passed",
+      "vulnerabilities": 0
+    },
+    "eslint": "passed with zero warnings",
+    "typescript": "passed",
+    "internationalization": {
+      "result": "passed",
+      "staticKeys": 353,
+      "translatedKeysPerLocale": 426,
+      "locales": [
+        "en",
+        "ja",
+        "es"
+      ]
+    },
+    "unitWorkflows": {
+      "result": "5 passed, 0 failed",
+      "coverage": [
+        "library boot, sorting, view selection, and command navigation",
+        "reader keyboard navigation, page notes, zoom, and reader settings",
+        "source import permission gate and completion",
+        "publication inspection",
+        "20,000-publication grid windowing with fewer than 100 mounted article nodes"
+      ]
+    },
+    "productionBuild": {
+      "result": "passed",
+      "viteModulesTransformed": 1807,
+      "note": "The main bundle produced a non-fatal Vite size advisory; PDF support remains isolated."
+    },
+    "playwright": {
+      "result": "4 passed, 0 failed",
+      "journeys": [
+        "desktop library, command search, reader, settings, and screenshots",
+        "MangaFire import permission gate and language handling",
+        "iPhone-size touch layout",
+        "dark library and reader"
+      ],
+      "accessibility": "Automated axe WCAG A and AA scans passed for light library, reader settings, source importer, phone layout, dark library, and dark reader."
+    }
+  },
+  "rust": {
+    "minimumSupportedToolchainCheck": "cargo +1.93.0 check --workspace --all-targets passed",
+    "format": "passed",
+    "clippy": "passed for workspace, all targets, all features, with warnings denied",
+    "tests": {
+      "result": "29 passed, 0 failed",
+      "areas": [
+        "archive formats, image decoding, and natural ordering",
+        "PDF metadata and pages",
+        "ComicInfo metadata",
+        "SQLite progress, bookmarks, backup, restore, relink, and watched folders",
+        "inspection, conversion, repair, and atomic writes",
+        "declarative connector validation, permission boundaries, staged page lists, and CBZ output",
+        "MangaFire URL parsing, series ordering, public-network policy, API parsing, and fail-closed output behavior",
+        "stored compression for downloaded comic pages"
+      ]
+    }
+  },
+  "mangaFire": {
+    "livePreviewRechecked": true,
+    "sourceStatus": 200,
+    "resolvedChapterCount": 17,
+    "estimatedSeriesPages": 435,
+    "availableScopes": [
+      "volume",
+      "series"
+    ],
+    "completeSeriesDownload": "passed",
+    "downloadedPages": 435,
+    "singleCbzProduced": true,
+    "partialOutputPublished": false,
+    "cbzReopenedByKoma": true,
+    "decodedPageSamples": [
+      0,
+      217,
+      434
+    ],
+    "independentZipTest": "passed for all 436 entries",
+    "outputBytes": 297993226,
+    "outputBlake3": "e9269898c74f8bf6649edae61c84b76715496677ee1cef01f678aa965e7b7b73",
+    "outputSha256": "a45b384102e846c046422a4fa7437abb14287377e97ded2fe70d19a8ec952607",
+    "detailedRecord": "docs/release-evidence/mangafire-live-2026-07-18.json"
+  },
+  "packaging": {
+    "macOs": {
+      "app": "passed",
+      "dmg": "passed",
+      "dmgVerification": "passed with CRC32 AD327E46",
+      "architecture": "arm64",
+      "externalNonSystemDynamicLibraries": 0,
+      "appBinaryBytes": 17536048,
+      "appBinarySha256": "fd33c5becabe52f44b90273047761ffcf5a3d0500ba24cad027d178d91f04c14",
+      "dmgBytes": 7776686,
+      "dmgSha256": "f0b4cd925e841a9fe8a55d7c209d5225d3c3e5cf5d5fb4fb81e8466b5980e6e6",
+      "nativeAcceptance": {
+        "launchedFromVerifiedDmg": true,
+        "realCbzPageCount": 1285,
+        "spreadRendered": true,
+        "fullscreenToolbarButton": "passed",
+        "fullscreenKeyboardShortcut": "passed",
+        "nativeWindowChromeHidden": true,
+        "escapeRestoredWindowedReader": true
+      }
+    },
+    "iosSimulatorSnapshot": {
+      "record": "docs/release-evidence/ios-simulator-2026-07-18.json",
+      "build": "passed earlier in this verification run",
+      "iPhoneLaunch": "passed",
+      "iPadLaunch": "passed",
+      "includedInDesktopCi": false,
+      "desktopUpdaterAvailable": false
+    }
+  },
+  "automation": {
+    "workflows": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml"
+    ],
+    "yamlParse": "passed",
+    "ciDesktopPackageJobs": [
+      "Ubuntu 22.04 AppImage/deb",
+      "Windows 2025 NSIS/MSI",
+      "macOS 15 arm64 app/DMG"
+    ],
+    "releaseTargets": [
+      "Linux x64",
+      "Windows x64",
+      "macOS Apple silicon",
+      "macOS Intel"
+    ],
+    "signedUpdaterMetadataConfigured": true,
+    "iosOrIpadOsJobPresent": false,
+    "remoteRun": "not run because no git remote is configured"
+  },
+  "explicitlyUnverified": [
+    "Windows runtime and installer behavior",
+    "Linux runtime and package behavior",
+    "physical iPhone and iPad behavior",
+    "Developer ID signing and notarization",
+    "App Store and TestFlight distribution",
+    "Windows code signing",
+    "remote GitHub Actions execution"
+  ]
+}

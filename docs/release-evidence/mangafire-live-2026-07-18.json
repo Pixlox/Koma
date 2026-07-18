@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 2,
+  "recordedAt": "2026-07-18T09:26:04Z",
+  "adapterVersion": "mangafire-api-2026.07-series.1",
+  "source": {
+    "provider": "MangaFire",
+    "url": "https://mangafire.to/title/70ox7-hatori-to-furuta-no-hinichijou-sahanji",
+    "status": 200,
+    "title": "Hatori to Furuta no Hinichijou Sahanji",
+    "selectedLanguage": "en"
+  },
+  "preview": {
+    "resolvedVolumes": [
+      {
+        "id": 339405,
+        "language": "en",
+        "chapterCount": 15,
+        "pageCount": 397,
+        "selected": true
+      },
+      {
+        "id": 342470,
+        "language": "es-la",
+        "chapterCount": 15,
+        "selected": false
+      },
+      {
+        "id": 340352,
+        "language": "pt-br",
+        "chapterCount": 15,
+        "selected": false
+      }
+    ],
+    "seriesChapterCount": 17,
+    "seriesPageCount": 435,
+    "availableScopes": [
+      "volume",
+      "series"
+    ]
+  },
+  "result": {
+    "completed": true,
+    "scope": "series",
+    "reopenedByKoma": true,
+    "format": "cbz",
+    "pageCount": 435,
+    "zipEntries": 436,
+    "firstPage": "0001-ch1-001.jpg",
+    "lastPage": "0435-ch17-019.jpg",
+    "outputBytes": 297993226,
+    "blake3": "e9269898c74f8bf6649edae61c84b76715496677ee1cef01f678aa965e7b7b73",
+    "sha256": "a45b384102e846c046422a4fa7437abb14287377e97ded2fe70d19a8ec952607",
+    "independentZipTest": "No errors detected in compressed data",
+    "comicInfoPageCount": 435,
+    "pageCompression": "stored",
+    "metadataCompression": "deflated"
+  },
+  "decodedPageSamples": [
+    {
+      "index": 0,
+      "mimeType": "image/jpeg",
+      "byteSize": 541633,
+      "blake3": "178028abb9b6d905c541b341dbaa7d4c025b1c2ac77a2133ff652ea314016a42"
+    },
+    {
+      "index": 217,
+      "mimeType": "image/jpeg",
+      "byteSize": 482678,
+      "blake3": "02aa7692bf36a92bb86bc829c0ebd2018a504307d3e4f87c9ef6066ce949d735"
+    },
+    {
+      "index": 434,
+      "mimeType": "image/jpeg",
+      "byteSize": 862174,
+      "blake3": "c5071192355fd90f758fadda3b335379687b8b2cd1eca5d355b26ebcb1675980"
+    }
+  ],
+  "privacy": {
+    "comicBytesCommittedToRepository": false,
+    "pageBytesCommittedToRepository": false,
+    "evidenceContainsOnlyMetadataCountsAndHashes": true
+  }
+}
