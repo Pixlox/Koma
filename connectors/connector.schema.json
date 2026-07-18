@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Pixlox/Koma/blob/main/connectors/connector.schema.json",
   "title": "Koma connector package",
+  "description": "Schema v1 declarative and schema v2 hybrid JSON/Rhai connector packages.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,34 +16,85 @@
     "allowedPageHosts",
     "mapping"
   ],
-  "oneOf": [
+  "allOf": [
     {
-      "properties": {
-        "mapping": {
-          "type": "object",
+      "oneOf": [
+        {
+          "properties": {
+            "mapping": {
+              "required": [
+                "chapterPages"
+              ]
+            }
+          }
+        },
+        {
           "required": [
-            "chapterPages"
+            "pageRequestUrl"
+          ],
+          "properties": {
+            "mapping": {
+              "required": [
+                "pageResponsePages"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "responseType": {
+            "const": "json"
+          }
+        },
+        "not": {
+          "required": [
+            "transformScript"
           ]
         }
       }
     },
     {
-      "required": [
-        "pageRequestUrl"
-      ],
-      "properties": {
-        "mapping": {
-          "type": "object",
-          "required": [
-            "pageResponsePages"
-          ]
-        }
+      "if": {
+        "properties": {
+          "responseType": {
+            "const": "text"
+          }
+        },
+        "required": [
+          "responseType"
+        ]
+      },
+      "then": {
+        "properties": {
+          "schemaVersion": {
+            "const": 2
+          }
+        },
+        "required": [
+          "transformScript"
+        ]
       }
     }
   ],
   "properties": {
+    "$schema": {
+      "type": "string"
+    },
     "schemaVersion": {
-      "const": 1
+      "enum": [
+        1,
+        2
+      ]
     },
     "id": {
       "type": "string",
@@ -88,6 +140,13 @@
     "allowLocalNetwork": {
       "type": "boolean",
       "default": false
+    },
+    "responseType": {
+      "enum": [
+        "json",
+        "text"
+      ],
+      "default": "json"
     },
     "capabilities": {
       "type": "array",
@@ -146,6 +205,12 @@
           "$ref": "#/$defs/pointer"
         }
       }
+    },
+    "transformScript": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 262144,
+      "description": "Schema v2 Rhai expression or script that returns the JSON value consumed by mapping."
     }
   },
   "$defs": {

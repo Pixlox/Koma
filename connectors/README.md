@@ -1,47 +1,56 @@
 # Koma connectors
 
-A Koma connector maps a permitted JSON feed into Koma's import model:
+Connectors help Koma import from a web source:
 
-`source link → feed → entries → pages → CBZ`
+`pasted link → declared request → optional Rhai transform → mapped chapters → validated pages → CBZ`
 
-Entries may represent chapters, issues, episodes, image sets, or any other ordered part of a serial publication. This keeps the staged source → entries → pages model useful beyond manga. Connector packages contain data only. They cannot execute code, access Koma's database, read files, start processes, or contact hosts that are not declared in the package.
+Each connector is one `.koma-connector.json` file. Readers install it from
+**Settings → Connectors → Import connector**. A connector never needs to be
+compiled into Koma.
 
-## Create a connector
+## Connector format
 
-1. Copy [`examples/koma-feed-v1.koma-connector.json`](examples/koma-feed-v1.koma-connector.json).
-2. Set a unique lowercase `id`, display `name`, and package `version`.
-3. Match pasted source links with `sourcePattern`. Named regex captures can be used in `requestUrl` as `$name`.
-4. Declare every API and page-image host.
-5. Map the JSON response with RFC 6901 JSON pointers.
-6. Validate the package against [`connector.schema.json`](connector.schema.json).
-7. In Koma, open **Settings → Connectors → Import connector**.
+Use `schemaVersion: 2` for new connectors.
 
-The complete field reference and testing checklist are in
-[`AUTHORING.md`](AUTHORING.md). The bundled MangaFire implementation is
-documented in [`examples/mangafire/`](examples/mangafire/) as an advanced
-multi-request example.
+Schema v2 has two paths:
 
-The feed request must return the title and an ordered list of entries. Page lists can be provided in either form:
+- **JSON mapping** for APIs that already expose titles, chapters, and page URLs.
+- **Rhai transform** for relative URLs, unusual JSON, computed fields, HTML,
+  signatures, and other response normalization.
 
-- Inline: set `mapping.chapterPages` to the page array inside each entry.
-- Staged: set `pageRequestUrl` to a URL template and `mapping.pageResponsePages` to the page array in that response. Placeholders such as `{/id}` read values from the current entry with a JSON pointer.
+Schema v1 remains supported for existing declarative JSON connectors. There is
+no connector schema v3.
 
-Koma sorts decimal entry numbers numerically, so `0`, `0.5`, `1`, and `1.5` retain the expected order. Both page-list forms support URL strings or objects with URL and optional dimension mappings.
+Start with:
 
-## Network permissions
+- [`examples/koma-feed-v1.koma-connector.json`](examples/koma-feed-v1.koma-connector.json)
+  for the simplest JSON feed.
+- [`examples/koma-staged-feed-v1.koma-connector.json`](examples/koma-staged-feed-v1.koma-connector.json)
+  for a separate page-list request per chapter.
+- [`examples/relative-pages-v2.koma-connector.json`](examples/relative-pages-v2.koma-connector.json)
+  for a schema v2 Rhai transform.
 
-- HTTPS is required for internet sources.
-- `allowedRequestHosts` limits feed requests.
-- `allowedPageHosts` limits image downloads.
-- A leading `*.` permits subdomains, but not the root domain.
-- `allowLocalNetwork` permits HTTP and private addresses for sources running on the user's own network. Koma shows this permission before installation.
-- A local feed can therefore run on `localhost` or a private LAN address without giving the connector access to arbitrary files.
-- Redirects are not followed.
+The complete field and scripting reference is in
+[`AUTHORING.md`](AUTHORING.md). The JSON Schema is
+[`connector.schema.json`](connector.schema.json).
 
-Koma pins DNS results for each import, limits response and image sizes, validates every downloaded image, caps concurrency, and packages pages only after all checks pass.
+## Permissions and safety
 
-## Versioning
+Every connector declares two host lists:
 
-`schemaVersion` is the connector API version. Koma currently accepts version `1`. Package `version` belongs to the connector author and can use any short release identifier.
+- `allowedRequestHosts` for metadata and page-list requests.
+- `allowedPageHosts` for downloaded page images.
 
-Version 1 targets JSON sources with inline or staged page lists. Future connector schema versions can add new source shapes without changing installed version 1 packages.
+Koma enforces those lists after DNS resolution, rejects undeclared redirects,
+requires HTTPS unless local-network access is explicitly enabled, caps response
+sizes and concurrency, validates every image, and only writes the final CBZ
+after all pages pass validation.
+
+A connector with `transformScript` runs Rhai code inside Koma. Koma shows a
+prominent warning before installation. The Rhai environment has operation,
+time, recursion, collection, string, and output limits. It is not given
+filesystem, process, environment, database, raw-socket, or arbitrary HTTP
+functions.
+
+> Be careful with connectors from untrusted sources. Inspect the JSON and Rhai code before installation. Koma does not provide a signature, GPG verification, trust store,
+or verified badge.

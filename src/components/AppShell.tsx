@@ -5,6 +5,7 @@ import {
   ArrowDownAZ,
   BookOpen,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleCheckBig,
   Clock3,
@@ -24,7 +25,6 @@ import {
   Languages,
   Menu,
   MoreHorizontal,
-  PanelRight,
   Plus,
   Search,
   Settings,
@@ -35,6 +35,7 @@ import {
   Wrench,
 } from "lucide-react";
 import {
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   useEffect,
   useRef,
@@ -176,8 +177,22 @@ export function AppShell() {
   const sidebarOpen = useKomaStore((state) => state.sidebarOpen);
   const sortMode = useKomaStore((state) => state.sortMode);
   const setSidebarOpen = useKomaStore((state) => state.setSidebarOpen);
+  const setSelectedId = useKomaStore((state) => state.setSelectedId);
   const selected = items.find((item) => item.id === selectedId) ?? null;
+  const showInspector = route !== "settings" && selected !== null;
   const filtered = visibleItems(items, route, search, sortMode);
+
+  const clearSelectionFromCanvas = (event: ReactPointerEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement;
+    if (
+      target.closest(
+        "button, a, input, select, textarea, [role='menuitem'], .book-card, .book-row, .continue-feature",
+      )
+    ) {
+      return;
+    }
+    setSelectedId(null);
+  };
 
   return (
     <div className="app-shell">
@@ -191,8 +206,12 @@ export function AppShell() {
       )}
       <div className="app-workspace">
         <TopBar />
-        <div className="content-frame">
-          <main className="library-main" id="main-content">
+        <div className={`content-frame${showInspector ? " has-inspector" : ""}`}>
+          <main
+            className="library-main"
+            id="main-content"
+            onPointerDown={clearSelectionFromCanvas}
+          >
             {route === "settings" ? (
               <SettingsView />
             ) : route === "home" && search.trim().length === 0 ? (
@@ -201,7 +220,9 @@ export function AppShell() {
               <CollectionView items={filtered} route={route} />
             )}
           </main>
-          <DetailInspector item={selected} />
+          {showInspector && selected !== null ? (
+            <DetailInspector item={selected} />
+          ) : null}
         </div>
       </div>
       <BottomNavigation />
@@ -220,10 +241,14 @@ function Sidebar({ open }: { open: boolean }) {
   ).length;
 
   return (
-    <aside className={`sidebar${open ? " is-open" : ""}`} aria-label="Koma">
+    <aside
+      className={`sidebar${open ? " is-open" : ""}`}
+      aria-label="Koma"
+      data-tauri-drag-region
+    >
       <div className="brand" data-tauri-drag-region>
-        <img src="/koma-mark.svg" alt="" />
-        <span>Koma</span>
+        <img src="/koma-mark.svg" alt="" data-tauri-drag-region />
+        <span data-tauri-drag-region>Koma</span>
       </div>
       <nav className="sidebar-nav" aria-label={tr("Library")}>
         {ROUTES.map((item) => {
@@ -285,7 +310,7 @@ function TopBar() {
 
   return (
     <header className="topbar" data-tauri-drag-region>
-      <div className="topbar-leading">
+      <div className="topbar-leading" data-tauri-drag-region>
         <button
           className="icon-button mobile-menu"
           type="button"
@@ -294,7 +319,7 @@ function TopBar() {
         >
           <Menu size={19} />
         </button>
-        <h1>{routeTitle(route)}</h1>
+        <h1 data-tauri-drag-region>{routeTitle(route)}</h1>
       </div>
       {route !== "settings" && (
         <div className="search-field" role="search">
@@ -915,24 +940,13 @@ function CoverFallback({ item }: { item: LibraryItem }) {
   );
 }
 
-function DetailInspector({ item }: { item: LibraryItem | null }) {
+function DetailInspector({ item }: { item: LibraryItem }) {
   const openBook = useKomaStore((state) => state.openBook);
   const openingId = useKomaStore((state) => state.readerOpeningId);
   const setFavorite = useKomaStore((state) => state.setFavorite);
   const revealItem = useKomaStore((state) => state.revealItem);
   const relinkItem = useKomaStore((state) => state.relinkItem);
   const setToolsItemId = useKomaStore((state) => state.setToolsItemId);
-  if (item === null) {
-    return (
-      <aside
-        className="detail-inspector is-empty"
-        aria-label={tr("Publication details")}
-      >
-        <PanelRight size={22} />
-        <p>{tr("Select a publication.")}</p>
-      </aside>
-    );
-  }
   return (
     <aside
       className="detail-inspector"
@@ -1280,7 +1294,7 @@ function LanguageSetting() {
   const setLanguage = useKomaStore((state) => state.setLanguage);
 
   return (
-    <label className="setting-select">
+    <label className="setting-select language-select">
       <Languages size={16} aria-hidden="true" />
       <select
         value={language}
@@ -1294,6 +1308,7 @@ function LanguageSetting() {
           </option>
         ))}
       </select>
+      <ChevronDown className="select-chevron" size={14} aria-hidden="true" />
     </label>
   );
 }
@@ -1326,6 +1341,7 @@ function ConnectorSettings() {
                 {connector.kind === "bundled"
                   ? tr("Bundled")
                   : `v${connector.version}`}
+                {connector.runsCode ? " · Rhai" : ""}
                 {" · "}
                 {connector.capabilities
                   .map((capability) =>

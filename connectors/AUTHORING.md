@@ -1,85 +1,28 @@
 # Connector authoring guide
 
-A connector turns an authorized JSON source into ordered pages that Koma can
-package as a CBZ. Version 1 connectors are declarative JSON: they cannot run
-scripts or access the local filesystem.
+Connectors should use `schemaVersion: 2` and remain a single JSON file. The
+filename must end in `.koma-connector.json`.
 
-Start with one of these packages:
-
-- [`examples/koma-feed-v1.koma-connector.json`](examples/koma-feed-v1.koma-connector.json)
-  for a feed that includes page URLs.
-- [`examples/koma-staged-feed-v1.koma-connector.json`](examples/koma-staged-feed-v1.koma-connector.json)
-  when each entry has a separate JSON page-list endpoint.
-
-## 1. Match the pasted link
-
-`sourcePattern` is a regular expression for the link a reader pastes into Koma.
-Use named captures for values needed by the feed request:
+## Minimal JSON connector
 
 ```json
 {
+  "$schema": "./connector.schema.json",
+  "schemaVersion": 2,
+  "id": "example-reader",
+  "name": "Example Reader",
+  "version": "1.0.0",
   "sourcePattern": "^https://reader\\.example/series/(?P<slug>[a-z0-9-]+)$",
-  "requestUrl": "https://api.reader.example/v1/series/$slug"
-}
-```
-
-Koma accepts the link only when the entire pattern matches. Use narrow patterns
-and HTTPS endpoints for internet sources.
-
-## 2. Declare network access
-
-Every request host must be listed:
-
-```json
-{
+  "requestUrl": "https://api.reader.example/series/$slug",
   "allowedRequestHosts": ["api.reader.example"],
-  "allowedPageHosts": ["images.reader.example", "*.images.reader.example"],
-  "allowLocalNetwork": false
-}
-```
-
-`*.images.reader.example` permits subdomains but not
-`images.reader.example` itself. Add both when both are used.
-
-Set `allowLocalNetwork` only for a connector intentionally designed for
-`localhost` or a private LAN service. Koma shows this permission before
-installation. Redirects are rejected, so the final host must be declared
-directly.
-
-## 3. Map the feed
-
-Mappings use RFC 6901 JSON pointers. Given:
-
-```json
-{
-  "data": {
-    "title": "Example",
-    "language": "en",
-    "entries": [
-      {
-        "number": 0.5,
-        "volume": 1,
-        "pages": [
-          {
-            "url": "https://images.reader.example/0001.webp",
-            "width": 1600,
-            "height": 2400
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-the mapping is:
-
-```json
-{
+  "allowedPageHosts": ["images.reader.example"],
+  "allowLocalNetwork": false,
+  "responseType": "json",
+  "capabilities": ["chapter", "volume", "series"],
   "mapping": {
     "title": "/data/title",
     "language": "/data/language",
-    "chapters": "/data/entries",
+    "chapters": "/data/chapters",
     "chapterNumber": "/number",
     "chapterVolume": "/volume",
     "chapterPages": "/pages",
@@ -90,69 +33,216 @@ the mapping is:
 }
 ```
 
-`language`, `chapterVolume`, `pageUrl`, `pageWidth`, and `pageHeight` are
-optional. Without `pageUrl`, each page entry must be a URL string. Without
-`language`, Koma records `und` (undetermined).
+`id` uses lowercase letters, numbers, and hyphens. `version` is the connector
+author's version; `schemaVersion` is Koma's connector API version.
 
-Entry numbers can be integers or decimals. Koma orders `0`, `0.5`, `1`, and
-`1.5` numerically.
+## Match links and build the request
 
-## 4. Use a staged page request when needed
-
-When the feed contains entries but not their pages, set `pageRequestUrl` and
-`mapping.pageResponsePages`:
+`sourcePattern` is a Rust regular expression. Named captures can be expanded in
+`requestUrl`:
 
 ```json
 {
-  "pageRequestUrl": "https://api.reader.example/entries/{/entryId}/pages",
-  "mapping": {
-    "title": "/work/title",
-    "chapters": "/work/entries",
-    "chapterNumber": "/number",
-    "pageResponsePages": "/data/pages",
-    "pageUrl": "/source"
+  "sourcePattern": "^https://reader\\.example/g/(?P<id>[0-9]+)/?$",
+  "requestUrl": "https://reader.example/api/galleries/$id"
+}
+```
+
+Keep the pattern narrow and anchored with `^` and `$`. Koma only considers a
+connector when the pasted link matches and the expanded request URL passes its
+host policy.
+
+## Declare network access
+
+```json
+{
+  "allowedRequestHosts": ["api.reader.example"],
+  "allowedPageHosts": [
+    "images.reader.example",
+    "*.images.reader.example"
+  ],
+  "allowLocalNetwork": false
+}
+```
+
+Important details:
+
+- Internet requests must use HTTPS.
+- `*.example.com` permits subdomains, not `example.com` itself.
+- Redirects are not followed.
+- Host permissions are checked again after DNS resolution.
+- Private, loopback, link-local, and reserved addresses are blocked unless
+  `allowLocalNetwork` is true.
+- Local-network connectors may use HTTP and should request the smallest
+  possible host set.
+
+## Map JSON with pointers
+
+Mappings use RFC 6901 JSON pointers. Given:
+
+```json
+{
+  "data": {
+    "title": "Example",
+    "language": "en",
+    "chapters": [
+      {
+        "number": 0.5,
+        "volume": 1,
+        "pages": [
+          {
+            "url": "https://images.reader.example/1.webp",
+            "width": 1200,
+            "height": 1800
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
-`{/entryId}` reads `/entryId` from the current entry. Koma may fetch up to six
-page lists concurrently, so the source should expose ordinary rate-limit
-headers or be sized for that request rate.
+use:
 
-## 5. Choose import scopes
+```json
+{
+  "mapping": {
+    "title": "/data/title",
+    "language": "/data/language",
+    "chapters": "/data/chapters",
+    "chapterNumber": "/number",
+    "chapterVolume": "/volume",
+    "chapterPages": "/pages",
+    "pageUrl": "/url",
+    "pageWidth": "/width",
+    "pageHeight": "/height"
+  }
+}
+```
 
-`capabilities` controls the choices shown in the importer:
+Required mappings are `title`, `chapters`, and `chapterNumber`.
 
-- `chapter` packages one selected entry.
-- `volume` groups entries with the same `chapterVolume`.
-- `series` packages every entry, earliest to latest.
+Optional mappings:
 
-Every version 1 connector supports `series`. Advertise `volume` only when
-`chapterVolume` is mapped.
+- `language`: BCP 47 language code. Defaults to `und`.
+- `chapterVolume`: number used to group chapters into volumes.
+- `pageUrl`: omit when each page is already a URL string.
+- `pageWidth` and `pageHeight`: checked against downloaded image dimensions.
 
-## 6. Validate and test
+Chapter and volume numbers may be decimals. Koma sorts `0`, `0.5`, `1`, and
+`1.5` numerically.
 
-Before publishing:
+## Separate page-list requests
 
-1. Validate the package against [`connector.schema.json`](connector.schema.json).
-2. Import it in **Settings → Connectors** and review the displayed host
-   permissions.
-3. Paste a matching source link and confirm the title, language, entry count,
-   page count, and available scopes.
-4. Download the smallest available chapter and reopen its CBZ in Koma.
-5. Test a non-matching link, a missing JSON field, an invalid image, and a host
-   outside the allowlist. Each must stop without leaving a partial CBZ.
-6. Test the largest expected series within Koma's page and size limits.
+When the first response contains chapters but not their pages, declare
+`pageRequestUrl` and `mapping.pageResponsePages` instead of
+`mapping.chapterPages`:
 
-Increase the package `version` when publishing an update. Keep the connector
-`id` stable so readers replace the existing installation instead of creating a
-duplicate.
+```json
+{
+  "pageRequestUrl": "https://api.reader.example/chapters/{/id}/pages",
+  "mapping": {
+    "title": "/title",
+    "chapters": "/chapters",
+    "chapterNumber": "/number",
+    "pageResponsePages": "/pages",
+    "pageUrl": "/url"
+  }
+}
+```
 
-## Version 1 limits
+Each `{/pointer}` placeholder reads from the current chapter object. Staged page
+responses must be JSON. Their request hosts use `allowedRequestHosts`.
 
-Version 1 is intended for stable JSON feeds with one feed request and either
-inline pages or one page-list request per entry. Sources requiring pagination,
-cookies, browser execution, signed requests, or provider-specific fallback
-logic need a native connector. The bundled
-[`MangaFire example`](examples/mangafire/) shows that shape.
+## Rhai transforms
 
+Add `transformScript` when the response cannot be mapped directly. Koma runs
+the script after the declared `requestUrl` succeeds and before JSON-pointer
+mapping.
+
+Available variables:
+
+- `response`: parsed JSON when `responseType` is `json`, otherwise the response
+  body as a UTF-8 string.
+- `source`: the original pasted link.
+- `captures`: a map containing named `sourcePattern` captures.
+
+The final expression must return a value matching your `mapping`. A convenient
+normalized shape is:
+
+```text
+{
+  title,
+  language,
+  chapters: [
+    {
+      number,
+      volume,
+      pages: [{ url, width, height }]
+    }
+  ]
+}
+```
+
+Example:
+
+```json
+{
+  "schemaVersion": 2,
+  "responseType": "json",
+  "mapping": {
+    "title": "/title",
+    "language": "/language",
+    "chapters": "/chapters",
+    "chapterNumber": "/number",
+    "chapterPages": "/pages",
+    "pageUrl": "/url"
+  },
+  "transformScript": "let pages = [];\nfor page in response.pages {\n    pages.push(#{ url: \"https://images.reader.example/\" + page.path });\n}\n#{ title: response.title, language: \"en\", chapters: [#{ number: 1, pages: pages }] }"
+}
+```
+
+For HTML, use `responseType: "text"` and a Rhai transform. Text responses are
+not accepted without a transform.
+
+### Registered helpers
+
+- `sha256(value)` → lowercase hexadecimal digest.
+- `hmac_sha256(secret, value)` → lowercase hexadecimal HMAC.
+- `base64(value)` → standard Base64.
+- `url_encode(value)` → percent-encoded string.
+- `regex_capture(value, pattern, group)` → captured string or `""`.
+- `regex_find_all(value, pattern)` → array of full matches.
+- `html_select(html, selector, attribute)` → selected attribute values.
+  Pass `""` as the attribute to collect element text.
+
+No other Koma APIs are exposed to Rhai.
+
+### Script limits
+
+Koma will enforce:
+
+- 500,000 Rhai operations.
+- Two seconds of wall-clock execution.
+- 32 call levels.
+- Restricted expression depth.
+- Eight MiB strings.
+- Page-count-sized arrays.
+- 16,384 map entries.
+- 32 MiB serialized transform output.
+
+`eval` and `import` are disabled. Scripts receive no filesystem, process,
+environment, database, raw-socket, or direct HTTP functions.
+
+## Capabilities
+
+`capabilities` controls the importer choices:
+
+```json
+{
+  "capabilities": ["chapter", "volume", "series"]
+}
+```
+
+Every connector must support `series`. Add `chapter` and `volume` only when the
+mapped feed provides meaningful choices for them.

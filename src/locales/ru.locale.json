@@ -204,6 +204,7 @@
     "Inspect, edit, convert, or repair": "Проверяйте, редактируйте, преобразуйте или ремонтируйте",
     "Inspection cancelled": "Проверка отменена",
     "Install {{name}}?": "Установить {{name}}?",
+    "Warning: this connector contains Rhai code. Arbitrary code execution may be possible. Only install connectors you trust.": "Предупреждение: этот коннектор содержит код Rhai. Возможно выполнение произвольного кода. Устанавливайте только доверенные коннекторы.",
     "Install update": "Установить обновление",
     "Invert": "Инвертировать",
     "Japanese": "японский",

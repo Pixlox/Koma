@@ -8,14 +8,19 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use futures_util::{StreamExt, TryStreamExt, stream};
+use hmac::{Hmac, Mac};
 use reqwest::{
     Client,
     header::{ACCEPT, CONTENT_TYPE, REFERER},
 };
+use rhai::{Array, Dynamic, Engine, Scope};
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 use uuid::Uuid;
@@ -33,8 +38,11 @@ use crate::{
     model::ImportReceipt,
 };
 
-const CONNECTOR_SCHEMA_VERSION: u32 = 1;
+const CONNECTOR_SCHEMA_VERSION_V1: u32 = 1;
+const CONNECTOR_SCHEMA_VERSION_V2: u32 = 2;
 const MAX_CONNECTOR_CHAPTERS: usize = 2_000;
+const MAX_SCRIPT_OPERATIONS: u64 = 500_000;
+const MAX_SCRIPT_SECONDS: u64 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +56,8 @@ pub enum ConnectorCapability {
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorManifest {
+    #[serde(rename = "$schema", default)]
+    pub json_schema: Option<String>,
     pub schema_version: u32,
     pub id: String,
     pub name: String,
@@ -62,9 +72,21 @@ pub struct ConnectorManifest {
     pub allowed_page_hosts: Vec<String>,
     #[serde(default)]
     pub allow_local_network: bool,
+    #[serde(default)]
+    pub response_type: ConnectorResponseType,
     #[serde(default = "default_capabilities")]
     pub capabilities: Vec<ConnectorCapability>,
     pub mapping: ConnectorMapping,
+    #[serde(default)]
+    pub transform_script: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectorResponseType {
+    #[default]
+    Json,
+    Text,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +122,8 @@ pub struct ConnectorSummary {
     pub kind: ConnectorKind,
     pub enabled: bool,
     pub removable: bool,
+    pub schema_version: u32,
+    pub runs_code: bool,
     pub capabilities: Vec<ConnectorCapability>,
 }
 
@@ -129,11 +153,32 @@ impl ConnectorManifest {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != CONNECTOR_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            CONNECTOR_SCHEMA_VERSION_V1 | CONNECTOR_SCHEMA_VERSION_V2
+        ) {
             return Err(KomaError::ImportDenied(format!(
                 "connector schema {} is not supported",
                 self.schema_version
             )));
+        }
+        if self.schema_version == CONNECTOR_SCHEMA_VERSION_V1 && self.transform_script.is_some() {
+            return Err(KomaError::ImportDenied(
+                "Rhai scripts require connector schema version 2".to_owned(),
+            ));
+        }
+        if self.response_type == ConnectorResponseType::Text && self.transform_script.is_none() {
+            return Err(KomaError::ImportDenied(
+                "text connector responses require a Rhai transform".to_owned(),
+            ));
+        }
+        if let Some(script) = &self.transform_script {
+            if script.trim().is_empty() || script.len() > 256 * 1024 {
+                return Err(KomaError::ImportDenied(
+                    "connector Rhai transform must contain 1 to 262144 characters".to_owned(),
+                ));
+            }
+            validate_script(script)?;
         }
         if self.id.len() < 3
             || self.id.len() > 64
@@ -248,6 +293,8 @@ impl ConnectorManifest {
             kind: ConnectorKind::Declarative,
             enabled: true,
             removable: true,
+            schema_version: self.schema_version,
+            runs_code: self.transform_script.is_some(),
             capabilities: self.capabilities.clone(),
         }
     }
@@ -284,6 +331,22 @@ impl DeclarativeImporter {
         let url = Url::parse(&expanded)?;
         self.validate_url(&url, &self.manifest.allowed_request_hosts)?;
         Ok(url)
+    }
+
+    fn source_captures(&self, source: &str) -> Result<BTreeMap<String, String>> {
+        let captures = self.matcher.captures(source.trim()).ok_or_else(|| {
+            KomaError::UnsupportedFormat("link does not match this connector".to_owned())
+        })?;
+        Ok(self
+            .matcher
+            .capture_names()
+            .flatten()
+            .filter_map(|name| {
+                captures
+                    .name(name)
+                    .map(|value| (name.to_owned(), value.as_str().to_owned()))
+            })
+            .collect())
     }
 
     fn validate_url(&self, url: &Url, allowed_hosts: &[String]) -> Result<()> {
@@ -373,9 +436,19 @@ impl DeclarativeImporter {
         let status = response.status();
         require_success(status, "connector request")?;
         let bytes = read_bounded(response, MAX_JSON_BYTES, "connector response").await?;
-        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-            KomaError::ProviderChanged(format!("connector returned invalid JSON: {error}"))
-        })?;
+        let value = match self.manifest.response_type {
+            ConnectorResponseType::Json => serde_json::from_slice(&bytes).map_err(|error| {
+                KomaError::ProviderChanged(format!("connector returned invalid JSON: {error}"))
+            })?,
+            ConnectorResponseType::Text => {
+                Value::String(String::from_utf8(bytes.to_vec()).map_err(|error| {
+                    KomaError::ProviderChanged(format!(
+                        "connector returned invalid UTF-8 text: {error}"
+                    ))
+                })?)
+            }
+        };
+        let value = self.transform_response(value, source).await?;
         let mut feed = map_feed(&value, &self.manifest)?;
         self.hydrate_pages(&mut feed).await?;
         for chapter in &feed.chapters {
@@ -385,6 +458,17 @@ impl DeclarativeImporter {
             }
         }
         Ok((feed, url, status.as_u16()))
+    }
+
+    async fn transform_response(&self, value: Value, source: &str) -> Result<Value> {
+        let Some(script) = self.manifest.transform_script.clone() else {
+            return Ok(value);
+        };
+        let captures = self.source_captures(source)?;
+        let source = source.trim().to_owned();
+        tokio::task::spawn_blocking(move || run_transform(&script, value, &source, captures))
+            .await
+            .map_err(|error| KomaError::Other(format!("connector script task failed: {error}")))?
     }
 
     async fn hydrate_pages(&self, feed: &mut MappedFeed) -> Result<()> {
@@ -694,8 +778,8 @@ impl LinkImporter for DeclarativeImporter {
             output_path,
             output_hash,
             adapter_version: format!(
-                "connector-v{CONNECTOR_SCHEMA_VERSION}:{}:{}:{ADAPTER_VERSION}",
-                self.manifest.id, self.manifest.version
+                "connector-v{}:{}:{}:{ADAPTER_VERSION}",
+                self.manifest.schema_version, self.manifest.id, self.manifest.version
             ),
         };
         emit(
@@ -994,6 +1078,158 @@ fn value_number(value: &Value) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
+fn validate_script(script: &str) -> Result<()> {
+    script_engine()
+        .compile(script)
+        .map(|_| ())
+        .map_err(|error| {
+            KomaError::ImportDenied(format!("connector Rhai transform is invalid: {error}"))
+        })
+}
+
+fn run_transform(
+    script: &str,
+    response: Value,
+    source: &str,
+    captures: BTreeMap<String, String>,
+) -> Result<Value> {
+    let mut engine = script_engine();
+    let started = std::time::Instant::now();
+    engine.on_progress(move |_| {
+        (started.elapsed() > std::time::Duration::from_secs(MAX_SCRIPT_SECONDS))
+            .then(|| Dynamic::from("connector script timed out"))
+    });
+    let ast = engine.compile(script).map_err(|error| {
+        KomaError::ProviderChanged(format!(
+            "connector Rhai transform could not compile: {error}"
+        ))
+    })?;
+    let response = rhai::serde::to_dynamic(response).map_err(|error| {
+        KomaError::ProviderChanged(format!(
+            "connector response could not be passed to Rhai: {error}"
+        ))
+    })?;
+    let captures = rhai::serde::to_dynamic(captures).map_err(|error| {
+        KomaError::ProviderChanged(format!(
+            "connector captures could not be passed to Rhai: {error}"
+        ))
+    })?;
+    let mut scope = Scope::new();
+    scope.push_dynamic("response", response);
+    scope.push("source", source.to_owned());
+    scope.push_dynamic("captures", captures);
+    let output = engine
+        .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
+        .map_err(|error| {
+            KomaError::ProviderChanged(format!("connector Rhai transform failed: {error}"))
+        })?;
+    let value: Value = rhai::serde::from_dynamic(&output).map_err(|error| {
+        KomaError::ProviderChanged(format!(
+            "connector Rhai transform returned unsupported data: {error}"
+        ))
+    })?;
+    let encoded = serde_json::to_vec(&value).map_err(|error| {
+        KomaError::ProviderChanged(format!(
+            "connector Rhai transform could not be measured: {error}"
+        ))
+    })?;
+    if encoded.len() as u64 > MAX_JSON_BYTES {
+        return Err(KomaError::ProviderChanged(
+            "connector Rhai transform exceeded the 32 MiB output limit".to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+fn script_engine() -> Engine {
+    let mut engine = Engine::new();
+    engine.set_max_operations(MAX_SCRIPT_OPERATIONS);
+    engine.set_max_call_levels(32);
+    engine.set_max_expr_depths(64, 32);
+    engine.set_max_string_size(8 * 1024 * 1024);
+    engine.set_max_array_size(MAX_PAGES);
+    engine.set_max_map_size(16_384);
+    engine.disable_symbol("eval");
+    engine.disable_symbol("import");
+    engine.on_print(|_| {});
+    engine.on_debug(|_, _, _| {});
+    engine.register_fn("sha256", |value: &str| -> String {
+        hex_bytes(&Sha256::digest(value.as_bytes()))
+    });
+    engine.register_fn("hmac_sha256", |secret: &str, value: &str| -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+            .expect("HMAC accepts keys of every size");
+        mac.update(value.as_bytes());
+        hex_bytes(&mac.finalize().into_bytes())
+    });
+    engine.register_fn("base64", |value: &str| -> String {
+        STANDARD.encode(value.as_bytes())
+    });
+    engine.register_fn("url_encode", |value: &str| -> String {
+        url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+    });
+    engine.register_fn(
+        "regex_capture",
+        |value: &str, pattern: &str, group: i64| -> String {
+            let Ok(group) = usize::try_from(group) else {
+                return String::new();
+            };
+            regex::Regex::new(pattern)
+                .ok()
+                .and_then(|regex| regex.captures(value))
+                .and_then(|captures| captures.get(group))
+                .map(|capture| capture.as_str().to_owned())
+                .unwrap_or_default()
+        },
+    );
+    engine.register_fn("regex_find_all", |value: &str, pattern: &str| -> Array {
+        regex::Regex::new(pattern)
+            .map(|regex| {
+                regex
+                    .find_iter(value)
+                    .take(MAX_PAGES)
+                    .map(|capture| Dynamic::from(capture.as_str().to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    engine.register_fn(
+        "html_select",
+        |html: &str, selector: &str, attribute: &str| -> Array {
+            let Some(selector) = Selector::parse(selector).ok() else {
+                return Array::new();
+            };
+            Html::parse_document(html)
+                .select(&selector)
+                .take(MAX_PAGES)
+                .filter_map(|element| {
+                    if attribute.is_empty() {
+                        Some(element.text().collect::<String>().trim().to_owned())
+                    } else {
+                        element
+                            .value()
+                            .attr(attribute)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned)
+                    }
+                })
+                .map(Dynamic::from)
+                .collect()
+        },
+    );
+    engine
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
 fn host_matches(host: &str, allowed: &str) -> bool {
     let allowed = allowed.trim().to_ascii_lowercase();
     if let Some(suffix) = allowed.strip_prefix("*.") {
@@ -1030,6 +1266,8 @@ pub fn bundled_mangafire_summary() -> ConnectorSummary {
         kind: ConnectorKind::Bundled,
         enabled: true,
         removable: false,
+        schema_version: 0,
+        runs_code: false,
         capabilities: vec![
             ConnectorCapability::Chapter,
             ConnectorCapability::Volume,
@@ -1048,11 +1286,12 @@ mod tests {
         net::TcpListener,
     };
 
-    use super::{ConnectorManifest, DeclarativeImporter, map_feed};
+    use super::{ConnectorManifest, DeclarativeImporter, map_feed, run_transform};
     use crate::importer::{ImportOptions, ImportScope, LinkImporter};
 
     fn manifest() -> ConnectorManifest {
         ConnectorManifest {
+            json_schema: None,
             schema_version: 1,
             id: "fixture-feed".to_owned(),
             name: "Fixture Feed".to_owned(),
@@ -1064,6 +1303,7 @@ mod tests {
             allowed_request_hosts: vec!["api.example.com".to_owned()],
             allowed_page_hosts: vec!["*.example-cdn.com".to_owned()],
             allow_local_network: false,
+            response_type: super::ConnectorResponseType::Json,
             capabilities: super::default_capabilities(),
             mapping: super::ConnectorMapping {
                 title: "/data/title".to_owned(),
@@ -1077,6 +1317,7 @@ mod tests {
                 page_width: None,
                 page_height: None,
             },
+            transform_script: None,
         }
     }
 
@@ -1115,11 +1356,54 @@ mod tests {
         for source in [
             include_str!("../../../../connectors/examples/koma-feed-v1.koma-connector.json"),
             include_str!("../../../../connectors/examples/koma-staged-feed-v1.koma-connector.json"),
+            include_str!("../../../../connectors/examples/relative-pages-v2.koma-connector.json"),
         ] {
             let manifest: ConnectorManifest =
                 serde_json::from_str(source).expect("example connector parses");
             manifest.validate().expect("example connector validates");
         }
+    }
+
+    #[test]
+    fn schema_v2_rhai_normalizes_relative_page_paths() {
+        let source =
+            include_str!("../../../../connectors/examples/relative-pages-v2.koma-connector.json");
+        let manifest = ConnectorManifest::from_json(source.as_bytes()).expect("v2 connector");
+        assert!(manifest.summary().runs_code);
+        let input = serde_json::json!({
+            "title": "Relative Fixture",
+            "language": "en",
+            "entries": [{
+                "number": 0.5,
+                "volume": 1,
+                "pages": [{"path": "gallery/1.webp", "width": 1200, "height": 1800}]
+            }]
+        });
+        let output = run_transform(
+            manifest.transform_script.as_deref().expect("script"),
+            input,
+            "https://reader.example/series/42",
+            std::collections::BTreeMap::from([("id".to_owned(), "42".to_owned())]),
+        )
+        .expect("transform");
+        let feed = map_feed(&output, &manifest).expect("mapped feed");
+        assert_eq!(feed.title, "Relative Fixture");
+        assert_eq!(feed.chapters[0].number, 0.5);
+        assert_eq!(
+            feed.chapters[0].pages[0].url,
+            "https://images.reader.example/gallery/1.webp"
+        );
+    }
+
+    #[test]
+    fn schema_v2_rhai_stops_runaway_scripts() {
+        let result = run_transform(
+            "loop {}",
+            serde_json::json!({}),
+            "https://reader.example/series/42",
+            std::collections::BTreeMap::new(),
+        );
+        assert!(result.is_err(), "runaway connector script must be stopped");
     }
 
     #[tokio::test]
@@ -1176,6 +1460,7 @@ mod tests {
             }
         });
         let manifest = ConnectorManifest {
+            json_schema: None,
             schema_version: 1,
             id: "local-fixture".to_owned(),
             name: "Local Fixture".to_owned(),
@@ -1190,6 +1475,7 @@ mod tests {
             allowed_request_hosts: vec!["127.0.0.1".to_owned()],
             allowed_page_hosts: vec!["127.0.0.1".to_owned()],
             allow_local_network: true,
+            response_type: super::ConnectorResponseType::Json,
             capabilities: vec![super::ConnectorCapability::Series],
             mapping: super::ConnectorMapping {
                 title: "/title".to_owned(),
@@ -1203,6 +1489,7 @@ mod tests {
                 page_width: None,
                 page_height: None,
             },
+            transform_script: None,
         };
         let importer = DeclarativeImporter::new(manifest).expect("importer");
         let destination = tempfile::tempdir().expect("destination");

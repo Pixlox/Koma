@@ -204,6 +204,7 @@
     "Inspect, edit, convert, or repair": "Kiểm tra, chỉnh sửa, chuyển đổi hoặc sửa chữa",
     "Inspection cancelled": "Đã hủy kiểm tra",
     "Install {{name}}?": "Cài đặt {{name}}?",
+    "Warning: this connector contains Rhai code. Arbitrary code execution may be possible. Only install connectors you trust.": "Cảnh báo: trình kết nối này chứa mã Rhai. Mã tùy ý có thể được thực thi. Chỉ cài đặt trình kết nối mà bạn tin cậy.",
     "Install update": "Cài đặt bản cập nhật",
     "Invert": "Đảo ngược",
     "Japanese": "tiếng Nhật",

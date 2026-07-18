@@ -181,11 +181,13 @@ class NativeBackend implements KomaBackend {
   }
 
   async pickPublications() {
+    const ios = document.documentElement.dataset.platform === "ios";
     const selection = await open({
       title: tr("Add comics to Koma"),
       multiple: true,
       directory: false,
-      fileAccessMode: "copy",
+      pickerMode: "document",
+      fileAccessMode: ios ? "scoped" : "copy",
       filters: [
         {
           name: tr("Comics and books"),
@@ -213,11 +215,13 @@ class NativeBackend implements KomaBackend {
   }
 
   async pickRelinkSource() {
+    const ios = document.documentElement.dataset.platform === "ios";
     const selection = await open({
       title: tr("Find the moved publication"),
       multiple: false,
       directory: false,
-      fileAccessMode: "copy",
+      pickerMode: "document",
+      fileAccessMode: ios ? "scoped" : "copy",
       filters: [
         {
           name: tr("Comics and books"),
@@ -254,11 +258,13 @@ class NativeBackend implements KomaBackend {
   }
 
   async pickConnectorPackage() {
+    const ios = document.documentElement.dataset.platform === "ios";
     const selection = await open({
       title: tr("Import Koma connector"),
       directory: false,
       multiple: false,
-      fileAccessMode: "copy",
+      pickerMode: "document",
+      fileAccessMode: ios ? "scoped" : "copy",
       filters: [
         {
           name: tr("Koma connector"),
@@ -708,6 +714,8 @@ class PreviewBackend implements KomaBackend {
         kind: "bundled" as const,
         enabled: true,
         removable: false,
+        schemaVersion: 0,
+        runsCode: false,
         capabilities: ["chapter", "volume", "series"] as Array<
           "chapter" | "volume" | "series"
         >,

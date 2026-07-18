@@ -204,6 +204,7 @@
     "Inspect, edit, convert, or repair": "Periksa, edit, ubah, atau perbaiki",
     "Inspection cancelled": "Inspeksi dibatalkan",
     "Install {{name}}?": "Instal {{name}}?",
+    "Warning: this connector contains Rhai code. Arbitrary code execution may be possible. Only install connectors you trust.": "Peringatan: konektor ini berisi kode Rhai. Eksekusi kode arbitrer mungkin terjadi. Hanya pasang konektor yang Anda percaya.",
     "Install update": "Instal pembaruan",
     "Invert": "Membalikkan",
     "Japanese": "Jepang",

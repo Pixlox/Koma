@@ -115,6 +115,23 @@ impl AppState {
 }
 
 fn load_connector(path: &Path) -> Result<Arc<DeclarativeImporter>, KomaError> {
+    #[cfg(target_os = "ios")]
+    {
+        use objc2_foundation::{NSString, NSURL};
+        let path_string = NSString::from_str(&path.to_string_lossy());
+        let url = NSURL::fileURLWithPath(&path_string);
+        let active = unsafe { url.startAccessingSecurityScopedResource() };
+        let result = load_connector_file(path);
+        if active {
+            unsafe { url.stopAccessingSecurityScopedResource() };
+        }
+        return result;
+    }
+    #[cfg(not(target_os = "ios"))]
+    load_connector_file(path)
+}
+
+fn load_connector_file(path: &Path) -> Result<Arc<DeclarativeImporter>, KomaError> {
     let metadata = std::fs::metadata(path)?;
     if !metadata.is_file() || metadata.len() > 1024 * 1024 {
         return Err(KomaError::ImportDenied(
@@ -128,6 +145,23 @@ fn load_connector(path: &Path) -> Result<Arc<DeclarativeImporter>, KomaError> {
         ));
     }
     Ok(Arc::new(DeclarativeImporter::new(manifest)?))
+}
+
+fn read_connector_file(path: &Path) -> Result<Vec<u8>, KomaError> {
+    #[cfg(target_os = "ios")]
+    {
+        use objc2_foundation::{NSString, NSURL};
+        let path_string = NSString::from_str(&path.to_string_lossy());
+        let url = NSURL::fileURLWithPath(&path_string);
+        let active = unsafe { url.startAccessingSecurityScopedResource() };
+        let result = std::fs::read(path).map_err(KomaError::from);
+        if active {
+            unsafe { url.stopAccessingSecurityScopedResource() };
+        }
+        return result;
+    }
+    #[cfg(not(target_os = "ios"))]
+    Ok(std::fs::read(path)?)
 }
 
 fn load_connectors(directory: &Path) -> Result<Vec<Arc<DeclarativeImporter>>, KomaError> {
@@ -413,7 +447,27 @@ fn copy_into_managed_library(source: &Path, directory: &Path) -> Result<PathBuf,
         destination = directory.join(format!("{source_stem} {suffix}.{extension}"));
         suffix += 1;
     }
-    std::fs::copy(source, &destination)?;
+
+    #[cfg(target_os = "ios")]
+    let (security_scoped_url, security_scope_active) = {
+        use objc2_foundation::{NSString, NSURL};
+        let path = NSString::from_str(&source.to_string_lossy());
+        let url = NSURL::fileURLWithPath(&path);
+        let active = unsafe { url.startAccessingSecurityScopedResource() };
+        (url, active)
+    };
+
+    let copy_result = std::fs::copy(source, &destination);
+
+    #[cfg(target_os = "ios")]
+    if security_scope_active {
+        unsafe { security_scoped_url.stopAccessingSecurityScopedResource() };
+    }
+
+    if let Err(error) = copy_result {
+        let _ = std::fs::remove_file(&destination);
+        return Err(error.into());
+    }
     Ok(destination)
 }
 
@@ -425,7 +479,12 @@ async fn relink_publication(
     password: Option<String>,
 ) -> Result<LibraryItem, CommandError> {
     let library = Arc::clone(&state.library);
+    let managed_directory = state.managed_library_directory.clone();
     let item = tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(mobile)]
+        let path = copy_into_managed_library(&path, &managed_directory)?;
+        #[cfg(not(mobile))]
+        let _ = managed_directory;
         library.relink(publication_id, path, password.as_deref())
     })
     .await
@@ -723,7 +782,7 @@ fn install_connector_package(
         state
             .connectors_directory
             .join(format!(".{}.{}.tmp", manifest.id, Uuid::now_v7()));
-    std::fs::write(&temporary, std::fs::read(&path)?)?;
+    std::fs::write(&temporary, read_connector_file(&path)?)?;
 
     let previous = state
         .connectors_directory
@@ -843,11 +902,8 @@ fn set_discord_presence(
         }
         return Ok(false);
     }
-    let client_id = option_env!("KOMA_DISCORD_CLIENT_ID").ok_or_else(|| {
-        KomaError::Other("Discord Rich Presence is not configured in this build".to_owned())
-    })?;
     if client.is_none() {
-        let mut connected = DiscordIpcClient::new(client_id);
+        let mut connected = DiscordIpcClient::new("1528082669257101543");
         connected
             .connect()
             .map_err(|error| KomaError::Other(format!("Discord is not available: {error}")))?;
@@ -859,7 +915,16 @@ fn set_discord_presence(
         .set_activity(
             activity::Activity::new()
                 .details(&details)
-                .state(&activity_state),
+                .state(&activity_state)
+                .assets(
+                    activity::Assets::new()
+                        .large_image("icon")
+                        .large_text("Koma"),
+                )
+                .buttons(vec![activity::Button::new(
+                    "Try out Koma",
+                    "https://github.com/Pixlox/Koma",
+                )]),
         )
         .map_err(|error| {
             KomaError::Other(format!("Discord presence could not be updated: {error}"))

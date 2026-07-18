@@ -204,6 +204,7 @@
     "Inspect, edit, convert, or repair": "검사, 편집, 변환 또는 수리",
     "Inspection cancelled": "검사가 취소됨",
     "Install {{name}}?": "{{name}}를 설치하시겠습니까?",
+    "Warning: this connector contains Rhai code. Arbitrary code execution may be possible. Only install connectors you trust.": "경고: 이 커넥터에는 Rhai 코드가 포함되어 있습니다. 임의 코드가 실행될 수 있습니다. 신뢰하는 커넥터만 설치하세요.",
     "Install update": "업데이트 설치",
     "Invert": "반전",
     "Japanese": "일본어",

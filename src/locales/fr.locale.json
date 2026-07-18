@@ -204,6 +204,7 @@
     "Inspect, edit, convert, or repair": "Inspecter, modifier, convertir ou réparer",
     "Inspection cancelled": "Contrôle annulé",
     "Install {{name}}?": "Installer {{name}} ?",
+    "Warning: this connector contains Rhai code. Arbitrary code execution may be possible. Only install connectors you trust.": "Avertissement : ce connecteur contient du code Rhai. Une exécution de code arbitraire peut être possible. N’installez que des connecteurs de confiance.",
     "Install update": "Installer la mise à jour",
     "Invert": "Inverser",
     "Japanese": "Japonais",

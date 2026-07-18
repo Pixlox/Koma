@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Bookmark,
   ChevronDown,
+  ChevronLeft,
   Columns2,
   Focus,
   Image as ImageIcon,
@@ -814,6 +815,7 @@ function ReaderToolbar({
       className="reader-toolbar"
       aria-hidden={!controlsVisible}
       inert={!controlsVisible}
+      data-fullscreen={fullscreen}
       data-tauri-drag-region
     >
       <div className="reader-toolbar-leading">
@@ -823,7 +825,7 @@ function ReaderToolbar({
           onClick={onClose}
           aria-label={tr("Close reader")}
         >
-          <X size={20} />
+          <ChevronLeft size={21} />
         </button>
         <div className="reader-title">
           <strong>{title}</strong>

@@ -4,13 +4,68 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: koma-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  prepare:
+    name: Prepare draft release
+    runs-on: ubuntu-22.04
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Validate release metadata
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          GITHUB_REF_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: npm run release:check
+
+      - name: Create or reuse draft
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .draft)"
+            if [ "$is_draft" != "true" ]; then
+              echo "Release $RELEASE_TAG already exists and is not a draft." >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --generate-notes \
+              --target "$GITHUB_SHA" \
+              --title "Koma $RELEASE_TAG"
+          fi
+
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
   desktop:
-    name: ${{ matrix.name }}
+    name: Build ${{ matrix.name }}
+    needs: prepare
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -19,15 +74,19 @@ jobs:
           - name: Linux x64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb,rpm
           - name: Windows x64
             os: windows-2025
             target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
           - name: macOS Apple silicon
             os: macos-15
             target: aarch64-apple-darwin
+            bundles: app,dmg
           - name: macOS Intel
             os: macos-15
             target: x86_64-apple-darwin
+            bundles: app,dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -42,7 +101,30 @@ jobs:
             librsvg2-dev \
             libgtk-3-dev \
             libssl-dev \
-            patchelf
+            patchelf \
+            rpm
+
+      - name: Configure Windows toolchain
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install WiX
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install wixtoolset --no-progress -y
+
+      - name: Add WiX to PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wix = Get-ChildItem 'C:\Program Files (x86)','C:\Program Files' `
+            -Directory -Filter 'WiX Toolset*' -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'bin\candle.exe') } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $wix) { throw 'WiX toolset was not found after installation.' }
+          Join-Path $wix.FullName 'bin' |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - uses: actions/setup-node@v6
         with:
@@ -57,9 +139,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: npm ci
-      - run: npm run release:check
-        env:
-          GITHUB_REF_NAME: ${{ github.ref_name }}
 
       - name: Prepare updater signing key
         shell: bash
@@ -72,18 +151,19 @@ jobs:
           chmod 600 "$key_file"
           echo "TAURI_SIGNING_PRIVATE_KEY=$key_file" >> "$GITHUB_ENV"
 
-      - name: Build draft release
-        uses: tauri-apps/tauri-action@v0
+      - name: Build installers and updater assets
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          KOMA_DISCORD_CLIENT_ID: ${{ vars.KOMA_DISCORD_CLIENT_ID }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Koma ${{ github.ref_name }}"
+          projectPath: .
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          tagName: ${{ needs.prepare.outputs.release_tag }}
           releaseDraft: true
           prerelease: false
-          generateReleaseNotes: true
+          retryAttempts: 2
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
-          args: --target ${{ matrix.target }}
+          uploadUpdaterSignatures: true
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}

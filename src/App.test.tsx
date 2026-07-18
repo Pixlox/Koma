@@ -142,6 +142,12 @@ describe("Koma application workflows", () => {
 
     expect(await screen.findByText("Done", {}, { timeout: 2_500 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open library" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "Open library" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Import from link" }),
+    );
+    expect(screen.getByLabelText("Source link")).toHaveValue("");
+    expect(screen.queryByText("MangaFire")).not.toBeInTheDocument();
   });
 
   it("opens the publication workbench and proves page inspection results", async () => {

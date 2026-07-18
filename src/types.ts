@@ -179,6 +179,8 @@ export interface ConnectorSummary {
   kind: ConnectorKind;
   enabled: boolean;
   removable: boolean;
+  schemaVersion: number;
+  runsCode: boolean;
   capabilities: Array<"chapter" | "volume" | "series">;
 }
 

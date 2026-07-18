@@ -288,6 +288,9 @@ export function ImportPanel() {
       );
     }
     setOpen(false);
+    if (phase === "complete") {
+      resetPreview("");
+    }
   };
 
   return (
@@ -579,7 +582,7 @@ export function ImportPanel() {
                 <button
                   type="button"
                   className="primary-button wide"
-                  onClick={() => setOpen(false)}
+                  onClick={close}
                 >
                   <BookReadyIcon />
                   {tr("Open library")}

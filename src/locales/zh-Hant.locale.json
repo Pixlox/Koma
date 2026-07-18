@@ -204,6 +204,7 @@
     "Inspect, edit, convert, or repair": "檢查、編輯、轉換或修復",
     "Inspection cancelled": "檢查取消",
     "Install {{name}}?": "安裝{{name}}？",
+    "Warning: this connector contains Rhai code. Arbitrary code execution may be possible. Only install connectors you trust.": "警告：此連接器包含 Rhai 程式碼，可能會執行任意程式碼。請僅安裝您信任的連接器。",
     "Install update": "安裝更新",
     "Invert": "反轉",
     "Japanese": "日語",

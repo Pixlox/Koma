@@ -581,11 +581,16 @@ export const useKomaStore = create<KomaState>((set, get) => ({
       const localNetwork = preview.allowLocalNetwork
         ? `\n${tr("Local network access")}`
         : "";
+      const codeWarning = preview.connector.runsCode
+        ? `\n\n${tr(
+            "Warning: this connector contains Rhai code. Arbitrary code execution may be possible. Only install connectors you trust.",
+          )}`
+        : "";
       const accepted = window.confirm(
         `${tr("Install {{name}}?", { name: preview.connector.name })}\n\n${tr(
           "Network access: {{hosts}}",
           { hosts },
-        )}${localNetwork}`,
+        )}${localNetwork}${codeWarning}`,
       );
       if (!accepted) return;
       const connector = await backend.installConnectorPackage(path);
