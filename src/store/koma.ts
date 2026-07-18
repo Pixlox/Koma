@@ -241,6 +241,7 @@ export const useKomaStore = create<KomaState>((set, get) => ({
       );
       return;
     }
+    document.documentElement.dataset.platform = payload.platform;
 
     const [libraryFolders, connectors] = await Promise.all([
       backend.listLibraryFolders().catch(() => []),

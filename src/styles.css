@@ -160,6 +160,7 @@ body,
 #root {
   width: 100%;
   height: 100%;
+  min-height: 100dvh;
   margin: 0;
   overflow: hidden;
 }
@@ -1874,6 +1875,10 @@ input:focus-visible,
   background: var(--surface-raised);
   border: 1px solid var(--line-strong);
   border-radius: 7px;
+}
+
+.link-field + .import-error {
+  margin-top: 12px;
 }
 
 .link-field:focus-within {
@@ -3992,7 +3997,7 @@ input:focus-visible,
   }
 
   .app-workspace {
-    height: calc(100% - 57px);
+    height: calc(100dvh - 58px - env(safe-area-inset-bottom));
   }
 
   .sidebar {
@@ -4096,7 +4101,7 @@ input:focus-visible,
     left: 0;
     display: grid;
     grid-template-columns: repeat(4, 1fr);
-    height: 58px;
+    min-height: calc(58px + env(safe-area-inset-bottom));
     padding: 5px max(5px, env(safe-area-inset-right))
       max(5px, env(safe-area-inset-bottom))
       max(5px, env(safe-area-inset-left));
@@ -4357,6 +4362,54 @@ input:focus-visible,
 }
 
 @media (pointer: coarse) {
+  body {
+    font-size: 16px;
+  }
+
+  .topbar {
+    min-height: 64px;
+  }
+
+  .search-field {
+    min-height: 46px;
+  }
+
+  .primary-button,
+  .secondary-button,
+  .text-button,
+  .menu-item,
+  .setting-select,
+  .segmented button {
+    min-height: 44px;
+  }
+
+  .drawer-header {
+    padding-top: max(22px, env(safe-area-inset-top));
+  }
+
+  .import-body {
+    padding: 22px 22px max(32px, env(safe-area-inset-bottom));
+  }
+
+  .link-field {
+    height: 48px;
+  }
+
+  .link-field input,
+  .permission-notice p,
+  .import-error p,
+  .approval-result p,
+  .confirmation-row {
+    font-size: 13px;
+  }
+
+  .permission-notice strong,
+  .import-error strong,
+  .approval-result strong,
+  .field-label {
+    font-size: 14px;
+  }
+
   .book-hover-actions {
     opacity: 1;
     transform: none;
@@ -4392,6 +4445,13 @@ input:focus-visible,
   .reader-top-bar {
     padding-top: max(10px, env(safe-area-inset-top));
   }
+}
+
+:root[data-platform="ios"] .managed-folders,
+:root[data-platform="android"] .managed-folders,
+:root[data-platform="ios"] .menu-shortcut,
+:root[data-platform="android"] .menu-shortcut {
+  display: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

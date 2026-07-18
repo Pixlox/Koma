@@ -65,6 +65,8 @@ export function ImportPanel() {
     total: 0,
     label: "",
   });
+  const mobile =
+    bootstrap?.platform === "ios" || bootstrap?.platform === "android";
 
   useEffect(() => {
     if (bootstrap !== null && destination === "~/Downloads/Koma") {
@@ -214,43 +216,77 @@ export function ImportPanel() {
     ) return;
     setPhase("checking");
     setError(null);
-    try {
-      const result = await backend.importLink(source.trim(), {
-        destinationDirectory: destination,
-        volumeId: selectedVolume,
-        chapterId: selectedChapter,
-        scope,
-        preferredLanguage:
-          (scope === "chapter"
-            ? preview.chapters.find((chapter) => chapter.id === selectedChapter)
-                ?.language
-            : preview.volumes.find((volume) => volume.id === selectedVolume)
-                ?.language) ??
-          "en",
-        overwriteExisting: false,
-        downloadConcurrency: 6,
-      });
-      addImportedItem(result.item);
-      setPhase("complete");
-      notify(
-        scope === "chapter"
-          ? tr("Chapter imported")
-          : scope === "series"
-            ? tr("Series imported")
-            : tr("Volume imported"),
-        tr("{{count}} pages saved as CBZ.", {
-          count: result.receipt.pageCount,
-        }),
-        "success",
-      );
-    } catch (caught) {
-      setPhase("error");
-      setError(errorMessage(caught));
+    const options = {
+      destinationDirectory: destination,
+      volumeId: selectedVolume,
+      chapterId: selectedChapter,
+      scope,
+      preferredLanguage:
+        (scope === "chapter"
+          ? preview.chapters.find((chapter) => chapter.id === selectedChapter)
+              ?.language
+          : preview.volumes.find((volume) => volume.id === selectedVolume)
+              ?.language) ?? "en",
+      overwriteExisting: false,
+      downloadConcurrency: 6,
+    };
+    let retry = 0;
+    for (;;) {
+      try {
+        const result = await backend.importLink(source.trim(), options);
+        addImportedItem(result.item);
+        setPhase("complete");
+        notify(
+          scope === "chapter"
+            ? tr("Chapter imported")
+            : scope === "series"
+              ? tr("Series imported")
+              : tr("Volume imported"),
+          tr("{{count}} pages saved as CBZ.", {
+            count: result.receipt.pageCount,
+          }),
+          "success",
+        );
+        return;
+      } catch (caught) {
+        const code = errorCode(caught);
+        const message = errorMessage(caught);
+        const networkFailure =
+          code === "provider_unavailable" ||
+          message.toLowerCase().includes("network error") ||
+          message.toLowerCase().includes("timed out");
+        if (!networkFailure || retry >= 11) {
+          setPhase("error");
+          setError(
+            networkFailure
+              ? tr("Download paused. Check your connection, then try again to continue.")
+              : message,
+          );
+          if (!useKomaStore.getState().importOpen) {
+            notify(tr("Download paused"), message, "warning");
+          }
+          return;
+        }
+        retry += 1;
+        setPhase("downloading");
+        setProgress((current) => ({
+          ...current,
+          label: tr("Connection lost. Retrying…"),
+        }));
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, Math.min(30_000, retry * 5_000)),
+        );
+      }
     }
   };
 
   const close = () => {
-    if (phase === "downloading" || phase === "packaging") return;
+    if (phase === "downloading" || phase === "packaging") {
+      notify(
+        tr("Download continues in the background"),
+        tr("Koma will notify you when it is ready."),
+      );
+    }
     setOpen(false);
   };
 
@@ -278,7 +314,6 @@ export function ImportPanel() {
             className="icon-button"
             aria-label={tr("Close importer")}
             onClick={close}
-            disabled={phase === "downloading" || phase === "packaging"}
           >
             <X size={19} />
           </button>
@@ -488,7 +523,7 @@ export function ImportPanel() {
                 ))}
               </fieldset>}
 
-              <div className="destination-row">
+              {!mobile && <div className="destination-row">
                 <div>
                   <span>{tr("Save to")}</span>
                   <strong title={destination}>{destination}</strong>
@@ -502,7 +537,7 @@ export function ImportPanel() {
                 >
                   <FolderOpen size={17} />
                 </button>
-              </div>
+              </div>}
 
               <label className="confirmation-row">
                 <input

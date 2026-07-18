@@ -29,6 +29,8 @@ export default function App() {
   const reloadLibrary = useKomaStore((state) => state.reloadLibrary);
   const reloadLibraryFolders = useKomaStore((state) => state.reloadLibraryFolders);
   const language = useKomaStore((state) => state.language);
+  const platform = useKomaStore((state) => state.bootstrap?.platform);
+  const route = useKomaStore((state) => state.route);
 
   useEffect(() => {
     void initialize();
@@ -36,6 +38,7 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (platform === "ios" || platform === "android") return;
       const target = event.target;
       const isEditing =
         target instanceof HTMLInputElement ||
@@ -67,7 +70,30 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [addFiles, reader, setCommandOpen, setImportOpen, setRoute]);
+  }, [addFiles, platform, reader, setCommandOpen, setImportOpen, setRoute]);
+
+  useEffect(() => {
+    if (!["macos", "windows", "linux"].includes(platform ?? "")) return;
+    const enabled = localStorage.getItem("koma.discordPresence") === "true";
+    const details =
+      reader === null
+        ? route === "home"
+          ? tr("Browsing home")
+          : tr("Browsing the library")
+        : tr("Reading {{title}}", {
+            title: reader.payload.manifest.metadata.title,
+          });
+    const activityState =
+      reader === null
+        ? tr("Choosing what to read")
+        : tr("Page {{current}} of {{total}}", {
+            current: reader.currentPage + 1,
+            total: reader.payload.manifest.pages.length,
+          });
+    void backend
+      .setDiscordPresence(enabled, details, activityState)
+      .catch(() => undefined);
+  }, [platform, reader, route]);
 
   useEffect(() => {
     if (backend.kind !== "native") return;

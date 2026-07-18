@@ -46,7 +46,7 @@ import {
   locale,
   tr,
 } from "../i18n";
-import { backend } from "../lib/backend";
+import { backend, errorMessage } from "../lib/backend";
 import {
   checkForUpdate,
   restartAfterUpdate,
@@ -280,6 +280,8 @@ function TopBar() {
   const addFiles = useKomaStore((state) => state.addFiles);
   const addFolder = useKomaStore((state) => state.addFolder);
   const setImportOpen = useKomaStore((state) => state.setImportOpen);
+  const platform = useKomaStore((state) => state.bootstrap?.platform);
+  const mobile = platform === "ios" || platform === "android";
 
   return (
     <header className="topbar" data-tauri-drag-region>
@@ -306,14 +308,16 @@ function TopBar() {
             aria-label={tr("Search your library")}
             spellCheck={false}
           />
-          <button
-            type="button"
-            className="search-shortcut"
-            onClick={() => setCommandOpen(true)}
-            aria-label={tr("Open command search")}
-          >
-            <span>{modifierSymbol()}</span>K
-          </button>
+          {!mobile && (
+            <button
+              type="button"
+              className="search-shortcut"
+              onClick={() => setCommandOpen(true)}
+              aria-label={tr("Open command search")}
+            >
+              <span>{modifierSymbol()}</span>K
+            </button>
+          )}
         </div>
       )}
       <div className="topbar-actions">
@@ -340,15 +344,17 @@ function TopBar() {
               >
                 <FileArchive size={16} />
                 {tr("Add files")}
-                <span className="menu-shortcut">{modifierSymbol()}O</span>
+                {!mobile && <span className="menu-shortcut">{modifierSymbol()}O</span>}
               </DropdownMenu.Item>
-              <DropdownMenu.Item
-                className="menu-item"
-                onSelect={() => void addFolder()}
-              >
-                <FolderOpen size={16} />
-                {tr("Scan folder")}
-              </DropdownMenu.Item>
+              {!mobile && (
+                <DropdownMenu.Item
+                  className="menu-item"
+                  onSelect={() => void addFolder()}
+                >
+                  <FolderOpen size={16} />
+                  {tr("Scan folder")}
+                </DropdownMenu.Item>
+              )}
               <DropdownMenu.Separator className="menu-separator" />
               <DropdownMenu.Item
                 className="menu-item"
@@ -1105,6 +1111,8 @@ function SettingsView() {
   const desktopUpdates =
     backend.kind === "native" &&
     ["macos", "windows", "linux"].includes(bootstrap?.platform ?? "");
+  const mobile =
+    bootstrap?.platform === "ios" || bootstrap?.platform === "android";
 
   return (
     <div className="settings-view">
@@ -1148,9 +1156,11 @@ function SettingsView() {
           />
         </SettingRow>
       </SettingsSection>
-      <SettingsSection title={tr("Library folders")}>
-        <ManagedFolders />
-      </SettingsSection>
+      {!mobile && (
+        <SettingsSection title={tr("Library folders")}>
+          <ManagedFolders />
+        </SettingsSection>
+      )}
       <SettingsSection title={tr("Connectors")}>
         <ConnectorSettings />
       </SettingsSection>
@@ -1185,6 +1195,11 @@ function SettingsView() {
           </button>
         </SettingRow>
       </SettingsSection>
+      {!mobile && (
+        <SettingsSection title={tr("Discord")}>
+          <DiscordPresenceSetting />
+        </SettingsSection>
+      )}
       {desktopUpdates && (
         <SettingsSection title={tr("Updates")}>
           <UpdateSetting />
@@ -1216,6 +1231,47 @@ function SettingsView() {
         </dl>
       </SettingsSection>
     </div>
+  );
+}
+
+function DiscordPresenceSetting() {
+  const [enabled, setEnabled] = useState(
+    () => localStorage.getItem("koma.discordPresence") === "true",
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const change = async (next: boolean) => {
+    setError(null);
+    try {
+      await backend.setDiscordPresence(
+        next,
+        tr("Browsing the library"),
+        tr("Choosing what to read"),
+      );
+      localStorage.setItem("koma.discordPresence", String(next));
+      setEnabled(next);
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setEnabled(false);
+      localStorage.setItem("koma.discordPresence", "false");
+    }
+  };
+
+  return (
+    <SettingRow label={tr("Rich Presence")}>
+      <div className="setting-with-error">
+        <label className="switch-control">
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => void change(event.target.checked)}
+            aria-label={tr("Discord Rich Presence")}
+          />
+          <span aria-hidden="true"><span /></span>
+        </label>
+        {error !== null && <span className="danger-text">{error}</span>}
+      </div>
+    </SettingRow>
   );
 }
 

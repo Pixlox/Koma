@@ -31,8 +31,9 @@ editing TypeScript or registering the locale anywhere else.
 - Keep keyboard shortcuts, file formats, product names, and `Koma` unchanged.
 - Use native punctuation and concise labels that fit the existing controls.
 - Check plural forms and long strings in the actual interface.
-- English, Japanese, and Spanish are already bundled and their locale codes are
-  reserved.
+- English, Japanese, Spanish, French, Indonesian, Korean, Russian, Thai,
+  Vietnamese, Simplified Chinese, and Traditional Chinese are already bundled;
+  their locale codes are reserved.
 
 The file format is defined by
 [`language.schema.json`](language.schema.json). The i18n check rejects malformed
@@ -41,4 +42,3 @@ changed placeholders.
 
 When English interface text changes, the same check reports which contributed
 languages need updating before the build can pass.
-

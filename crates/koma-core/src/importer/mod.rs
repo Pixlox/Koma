@@ -445,7 +445,18 @@ impl MangaFireImporter {
                 continue;
             }
             require_success(status, "MangaFire data request")?;
-            let bytes = read_bounded(response, MAX_JSON_BYTES, "MangaFire response").await?;
+            let bytes = match read_bounded(response, MAX_JSON_BYTES, "MangaFire response").await {
+                Ok(bytes) => bytes,
+                Err(KomaError::Network(_)) if attempt < 6 => {
+                    self.evict_pinned_client(url);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        400 * 2_u64.pow(attempt as u32),
+                    ))
+                    .await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             return serde_json::from_slice(&bytes).map_err(|error| {
                 KomaError::ProviderChanged(format!("invalid JSON response: {error}"))
             });
@@ -466,6 +477,14 @@ impl MangaFireImporter {
     ) -> Result<(String, PathBuf)> {
         let page_url = Url::parse(&page.url)?;
         validate_page_url(&page_url, self.origin.host_str())?;
+        if let Some(existing) = existing_staged_page(staging_directory, name_stem)? {
+            let bytes = std::fs::read(&existing.1)?;
+            if validate_page_bytes(&existing.0, &bytes).is_ok() {
+                downloaded_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                return Ok(existing);
+            }
+            std::fs::remove_file(existing.1)?;
+        }
         let response = self.send_page_request(&page_url, referer, index).await?;
         require_success(response.status(), &format!("page {} download", index + 1))?;
         let content_type = response
@@ -702,9 +721,10 @@ impl MangaFireImporter {
         );
 
         std::fs::create_dir_all(&options.destination_directory)?;
-        let staging = tempfile::tempdir_in(&options.destination_directory)?;
-        let staging_pages = staging.path().join("pages");
-        std::fs::create_dir(&staging_pages)?;
+        let staging_pages = persistent_staging_pages(
+            &options.destination_directory,
+            &format!("chapter-{}-{selected_id}", resolved.target.hid),
+        )?;
         let name_width = total.to_string().len().max(3);
         let concurrency = options.download_concurrency.clamp(1, 8);
         let referer = resolved.proof.url.clone();
@@ -803,6 +823,7 @@ impl MangaFireImporter {
                 receipt: receipt.clone(),
             },
         );
+        remove_completed_staging(&staging_pages);
         Ok(receipt)
     }
 
@@ -838,9 +859,13 @@ impl MangaFireImporter {
         );
 
         std::fs::create_dir_all(&options.destination_directory)?;
-        let staging = tempfile::tempdir_in(&options.destination_directory)?;
-        let staging_pages = staging.path().join("pages");
-        std::fs::create_dir(&staging_pages)?;
+        let staging_pages = persistent_staging_pages(
+            &options.destination_directory,
+            &format!(
+                "series-{}-{}",
+                resolved.target.hid, resolved.volume.language
+            ),
+        )?;
         let global_width = total.to_string().len().max(4);
         let mut specifications = Vec::with_capacity(total);
         for chapter in &chapters {
@@ -952,6 +977,7 @@ impl MangaFireImporter {
                 receipt: receipt.clone(),
             },
         );
+        remove_completed_staging(&staging_pages);
         Ok(receipt)
     }
 
@@ -1008,6 +1034,37 @@ fn client_builder() -> reqwest::ClientBuilder {
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(45))
         .user_agent(concat!("Koma/", env!("CARGO_PKG_VERSION")))
+}
+
+fn persistent_staging_pages(destination: &Path, key: &str) -> Result<PathBuf> {
+    let id = blake3::hash(key.as_bytes()).to_hex();
+    let pages = destination
+        .join(".koma-downloads")
+        .join(&id.as_str()[..20])
+        .join("pages");
+    std::fs::create_dir_all(&pages)?;
+    Ok(pages)
+}
+
+fn existing_staged_page(directory: &Path, stem: &str) -> Result<Option<(String, PathBuf)>> {
+    let prefix = format!("{stem}.");
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_file() && name.starts_with(&prefix) {
+            return Ok(Some((name, entry.path())));
+        }
+    }
+    Ok(None)
+}
+
+fn remove_completed_staging(pages: &Path) {
+    if let Some(job) = pages.parent() {
+        let _ = std::fs::remove_dir_all(job);
+        if let Some(root) = job.parent() {
+            let _ = std::fs::remove_dir(root);
+        }
+    }
 }
 
 fn provider_retry_delay(response: &Response, attempt: usize) -> std::time::Duration {
@@ -1145,9 +1202,10 @@ impl LinkImporter for MangaFireImporter {
         // No destination directory or page file exists until every guarded
         // provider request above has succeeded.
         std::fs::create_dir_all(&options.destination_directory)?;
-        let staging = tempfile::tempdir_in(&options.destination_directory)?;
-        let staging_pages = staging.path().join("pages");
-        std::fs::create_dir(&staging_pages)?;
+        let staging_pages = persistent_staging_pages(
+            &options.destination_directory,
+            &format!("volume-{}-{}", resolved.target.hid, resolved.volume.id),
+        )?;
 
         let total = resolved.volume.pages.len();
         let concurrency = options.download_concurrency.clamp(1, 8);
@@ -1319,6 +1377,7 @@ impl LinkImporter for MangaFireImporter {
                 receipt: receipt.clone(),
             },
         );
+        remove_completed_staging(&staging_pages);
         Ok(receipt)
     }
 }

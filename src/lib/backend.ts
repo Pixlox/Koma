@@ -106,6 +106,11 @@ export interface KomaBackend {
   previewLink(source: string): Promise<ImportPreview>;
   importLink(source: string, options: ImportOptions): Promise<LinkImportResult>;
   onImportEvent(handler: (event: ImportEvent) => void): Promise<UnlistenFn>;
+  setDiscordPresence(
+    enabled: boolean,
+    details: string,
+    activityState: string,
+  ): Promise<boolean>;
   exportLibraryBackup(destination: string): Promise<string>;
   restoreLibraryBackup(source: string): Promise<BackupRestoreReport>;
   inspectPublication(
@@ -439,6 +444,18 @@ class NativeBackend implements KomaBackend {
   onImportEvent(handler: (event: ImportEvent) => void) {
     return listen<ImportEvent>("koma://import-event", (event) => {
       handler(event.payload);
+    });
+  }
+
+  setDiscordPresence(
+    enabled: boolean,
+    details: string,
+    activityState: string,
+  ) {
+    return invoke<boolean>("set_discord_presence", {
+      enabled,
+      details,
+      activityState,
     });
   }
 
@@ -964,6 +981,10 @@ class PreviewBackend implements KomaBackend {
     return Promise.resolve(() => {
       this.importHandlers.delete(handler);
     });
+  }
+
+  setDiscordPresence() {
+    return Promise.resolve(false);
   }
 
   exportLibraryBackup() {

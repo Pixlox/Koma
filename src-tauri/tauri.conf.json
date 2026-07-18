@@ -19,6 +19,8 @@
         "minHeight": 480,
         "center": true,
         "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "transparent": false,
         "dragDropEnabled": true
       }
@@ -50,7 +52,7 @@
     "category": "Entertainment",
     "shortDescription": "A fast, local-first comic and manga reader.",
     "longDescription": "Koma is a native-minimal, local-first reader and library for comic and manga archives.",
-    "copyright": "Copyright © 2026 Omar",
+    "copyright": "Copyright © 2026 Pixlox",
     "createUpdaterArtifacts": true,
     "fileAssociations": [
       {

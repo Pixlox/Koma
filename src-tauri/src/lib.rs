@@ -5,6 +5,8 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(desktop)]
+use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use koma_core::{
     BackupRestoreReport, Bookmark, ConnectorManifest, ConnectorSummary, ConversionOptions,
     ConversionReport, DeclarativeImporter, ImportOptions, ImportPreview, ImportReceipt, KomaError,
@@ -27,12 +29,16 @@ struct AppState {
     readers: Mutex<HashMap<Uuid, Arc<dyn PublicationReader>>>,
     pending_open_paths: Mutex<Vec<PathBuf>>,
     default_import_directory: PathBuf,
+    managed_library_directory: PathBuf,
+    #[cfg(desktop)]
+    discord: Mutex<Option<DiscordIpcClient>>,
 }
 
 impl AppState {
     fn new(
         database_path: &Path,
         default_import_directory: PathBuf,
+        managed_library_directory: PathBuf,
         pending_open_paths: Vec<PathBuf>,
     ) -> Result<Self, KomaError> {
         let connectors_directory = database_path
@@ -48,6 +54,9 @@ impl AppState {
             readers: Mutex::new(HashMap::new()),
             pending_open_paths: Mutex::new(pending_open_paths),
             default_import_directory,
+            managed_library_directory,
+            #[cfg(desktop)]
+            discord: Mutex::new(None),
         })
     }
 
@@ -362,14 +371,50 @@ async fn add_publication(
     password: Option<String>,
 ) -> Result<LibraryItem, CommandError> {
     let library = Arc::clone(&state.library);
-    tauri::async_runtime::spawn_blocking(move || library.import_path(path, password.as_deref()))
-        .await
-        .map_err(|error| CommandError {
-            code: "operation_failed",
-            message: format!("file import task failed: {error}"),
-            recoverable: true,
-        })?
-        .map_err(Into::into)
+    let managed_directory = state.managed_library_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(mobile)]
+        let path = copy_into_managed_library(&path, &managed_directory)?;
+        #[cfg(not(mobile))]
+        let _ = managed_directory;
+        library.import_path(path, password.as_deref())
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("file import task failed: {error}"),
+        recoverable: true,
+    })?
+    .map_err(Into::into)
+}
+
+#[cfg(mobile)]
+fn copy_into_managed_library(source: &Path, directory: &Path) -> Result<PathBuf, KomaError> {
+    if source.starts_with(directory) {
+        return Ok(source.to_owned());
+    }
+    std::fs::create_dir_all(directory)?;
+    let file_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Imported comic.cbz");
+    let source_stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Imported comic");
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("cbz");
+    let mut destination = directory.join(file_name);
+    let mut suffix = 2_u32;
+    while destination.exists() {
+        destination = directory.join(format!("{source_stem} {suffix}.{extension}"));
+        suffix += 1;
+    }
+    std::fs::copy(source, &destination)?;
+    Ok(destination)
 }
 
 #[tauri::command]
@@ -779,6 +824,49 @@ async fn import_link(
     Ok(LinkImportResult { receipt, item })
 }
 
+#[cfg(desktop)]
+#[tauri::command]
+fn set_discord_presence(
+    state: State<'_, AppState>,
+    enabled: bool,
+    details: String,
+    activity_state: String,
+) -> Result<bool, CommandError> {
+    let mut client = state
+        .discord
+        .lock()
+        .map_err(|_| KomaError::Other("the Discord presence lock was poisoned".to_owned()))?;
+    if !enabled {
+        if let Some(mut active) = client.take() {
+            let _ = active.clear_activity();
+            let _ = active.close();
+        }
+        return Ok(false);
+    }
+    let client_id = option_env!("KOMA_DISCORD_CLIENT_ID").ok_or_else(|| {
+        KomaError::Other("Discord Rich Presence is not configured in this build".to_owned())
+    })?;
+    if client.is_none() {
+        let mut connected = DiscordIpcClient::new(client_id);
+        connected
+            .connect()
+            .map_err(|error| KomaError::Other(format!("Discord is not available: {error}")))?;
+        *client = Some(connected);
+    }
+    client
+        .as_mut()
+        .expect("Discord client was initialized")
+        .set_activity(
+            activity::Activity::new()
+                .details(&details)
+                .state(&activity_state),
+        )
+        .map_err(|error| {
+            KomaError::Other(format!("Discord presence could not be updated: {error}"))
+        })?;
+    Ok(true)
+}
+
 #[tauri::command]
 async fn export_library_backup(
     state: State<'_, AppState>,
@@ -958,17 +1046,22 @@ async fn save_publication_metadata(
 fn setup_state(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_directory = app.path().app_data_dir()?;
     std::fs::create_dir_all(&data_directory)?;
+    let managed_library_directory = data_directory.join("Library");
+    #[cfg(not(mobile))]
     let default_import_directory = app
         .path()
         .download_dir()
-        .unwrap_or_else(|_| data_directory.join("Imports"))
-        .join("Koma");
+        .map(|directory| directory.join("Koma"))
+        .unwrap_or_else(|_| data_directory.join("Imports"));
+    #[cfg(mobile)]
+    let default_import_directory = managed_library_directory.clone();
     let working_directory = std::env::current_dir().unwrap_or_else(|_| data_directory.clone());
     let arguments = std::env::args().collect::<Vec<_>>();
     let pending_open_paths = open_paths_from_arguments(&arguments, &working_directory);
     let state = AppState::new(
         &data_directory.join("library.sqlite3"),
         default_import_directory,
+        managed_library_directory,
         pending_open_paths,
     )?;
     let library = Arc::clone(&state.library);
@@ -1028,25 +1121,22 @@ fn scan_registered_folder(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default();
+    let builder = tauri::Builder::default();
     #[cfg(desktop)]
-    {
-        builder = builder
-            .plugin(tauri_plugin_updater::Builder::new().build())
-            .plugin(tauri_plugin_process::init())
-            .plugin(tauri_plugin_single_instance::init(
-                |app, arguments, working_directory| {
-                    let paths =
-                        open_paths_from_arguments(&arguments, Path::new(&working_directory));
-                    queue_open_paths(app, paths);
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.unminimize();
-                        let _ = window.set_focus();
-                    }
-                },
-            ));
-    }
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_single_instance::init(
+            |app, arguments, working_directory| {
+                let paths = open_paths_from_arguments(&arguments, Path::new(&working_directory));
+                queue_open_paths(app, paths);
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            },
+        ));
 
     builder
         .plugin(tauri_plugin_dialog::init())
@@ -1080,6 +1170,8 @@ pub fn run() {
             remove_connector,
             preview_link,
             import_link,
+            #[cfg(desktop)]
+            set_discord_presence,
             export_library_backup,
             restore_library_backup,
             inspect_library_publication,
@@ -1089,15 +1181,15 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("Koma could not start")
-        .run(|app, event| {
+        .run(|_app, _event| {
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
-            if let tauri::RunEvent::Opened { urls } = event {
+            if let tauri::RunEvent::Opened { urls } = _event {
                 let paths = urls
                     .into_iter()
                     .filter_map(|url| url.to_file_path().ok())
                     .filter(|path| path.is_dir() || PublicationFormat::from_path(path).is_some())
                     .collect();
-                queue_open_paths(app, paths);
+                queue_open_paths(_app, paths);
             }
         });
 }
