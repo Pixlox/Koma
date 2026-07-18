@@ -371,15 +371,13 @@ function TopBar() {
                 {tr("Add files")}
                 {!mobile && <span className="menu-shortcut">{modifierSymbol()}O</span>}
               </DropdownMenu.Item>
-              {!mobile && (
-                <DropdownMenu.Item
-                  className="menu-item"
-                  onSelect={() => void addFolder()}
-                >
-                  <FolderOpen size={16} />
-                  {tr("Scan folder")}
-                </DropdownMenu.Item>
-              )}
+              <DropdownMenu.Item
+                className="menu-item"
+                onSelect={() => void addFolder()}
+              >
+                <FolderOpen size={16} />
+                {tr("Scan folder")}
+              </DropdownMenu.Item>
               <DropdownMenu.Separator className="menu-separator" />
               <DropdownMenu.Item
                 className="menu-item"
@@ -738,13 +736,18 @@ function BookCard({ item }: { item: LibraryItem }) {
   const openingId = useKomaStore((state) => state.readerOpeningId);
   const setSelectedId = useKomaStore((state) => state.setSelectedId);
   const openBook = useKomaStore((state) => state.openBook);
+  const platform = useKomaStore((state) => state.bootstrap?.platform);
+  const mobile = platform === "ios" || platform === "android";
   return (
     <article
       className={`book-card${selectedId === item.id ? " is-selected" : ""}`}
       aria-label={item.title}
       tabIndex={0}
-      onClick={() => setSelectedId(item.id)}
-      onDoubleClick={() => void openBook(item)}
+      onClick={() => {
+        setSelectedId(item.id);
+        if (mobile) void openBook(item);
+      }}
+      onDoubleClick={mobile ? undefined : () => void openBook(item)}
       onKeyDown={(event) => {
         if (event.key === "Enter") void openBook(item);
       }}
@@ -797,12 +800,17 @@ function BookRow({ item }: { item: LibraryItem }) {
   const selectedId = useKomaStore((state) => state.selectedId);
   const setSelectedId = useKomaStore((state) => state.setSelectedId);
   const openBook = useKomaStore((state) => state.openBook);
+  const platform = useKomaStore((state) => state.bootstrap?.platform);
+  const mobile = platform === "ios" || platform === "android";
   return (
     <article
       className={`book-row${selectedId === item.id ? " is-selected" : ""}`}
       tabIndex={0}
-      onClick={() => setSelectedId(item.id)}
-      onDoubleClick={() => void openBook(item)}
+      onClick={() => {
+        setSelectedId(item.id);
+        if (mobile) void openBook(item);
+      }}
+      onDoubleClick={mobile ? undefined : () => void openBook(item)}
       onKeyDown={(event) => {
         if (event.key === "Enter") void openBook(item);
       }}
@@ -843,6 +851,8 @@ function BookMenu({ item }: { item: LibraryItem }) {
   const relinkItem = useKomaStore((state) => state.relinkItem);
   const removeItem = useKomaStore((state) => state.removeItem);
   const setToolsItemId = useKomaStore((state) => state.setToolsItemId);
+  const platform = useKomaStore((state) => state.bootstrap?.platform);
+  const mobile = platform === "ios" || platform === "android";
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
@@ -890,13 +900,15 @@ function BookMenu({ item }: { item: LibraryItem }) {
             <Wrench size={16} />
             {tr("Inspect, edit, and convert")}
           </DropdownMenu.Item>
-          <DropdownMenu.Item
-            className="menu-item"
-            onSelect={() => void revealItem(item)}
-          >
-            <FolderOpen size={16} />
-            {tr("Reveal in folder")}
-          </DropdownMenu.Item>
+          {!mobile && (
+            <DropdownMenu.Item
+              className="menu-item"
+              onSelect={() => void revealItem(item)}
+            >
+              <FolderOpen size={16} />
+              {tr("Reveal in folder")}
+            </DropdownMenu.Item>
+          )}
           {item.isMissing && (
             <DropdownMenu.Item
               className="menu-item"

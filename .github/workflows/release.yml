@@ -166,4 +166,75 @@ jobs:
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           uploadUpdaterSignatures: true
+          uploadWorkflowArtifacts: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+  verify:
+    name: Verify release assets
+    needs: [prepare, desktop]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check installers and updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assets="$(gh api \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+            --paginate \
+            --jq '.[].name')"
+
+          require_asset() {
+            local description="$1"
+            local pattern="$2"
+            if [[ ! "$assets" =~ $pattern ]]; then
+              echo "Missing $description release asset." >&2
+              echo "$assets" >&2
+              exit 1
+            fi
+          }
+
+          require_asset "Windows NSIS installer" '-setup\.exe$'
+          require_asset "Windows MSI installer" '\.msi$'
+          require_asset "macOS Apple silicon DMG" '_(aarch64|arm64)\.dmg$'
+          require_asset "macOS Intel DMG" '_(x64|x86_64)\.dmg$'
+          require_asset "Linux AppImage" '\.AppImage$'
+          require_asset "Linux Debian package" '\.deb$'
+          require_asset "Linux RPM package" '\.rpm$'
+          require_asset "updater signatures" '\.sig$'
+          require_asset "Tauri updater manifest" '^latest\.json$'
+
+          mkdir -p "$RUNNER_TEMP/koma-release"
+          gh release download "$RELEASE_TAG" \
+            --pattern latest.json \
+            --dir "$RUNNER_TEMP/koma-release" \
+            --clobber
+
+          manifest="$RUNNER_TEMP/koma-release/latest.json"
+          version="${RELEASE_TAG#v}"
+
+          jq -e --arg version "$version" '.version == $version' "$manifest"
+          jq -e '
+            .platforms
+            | has("darwin-aarch64")
+              and has("darwin-x86_64")
+              and has("linux-x86_64")
+              and has("windows-x86_64")
+          ' "$manifest"
+          jq -e --arg tag "$RELEASE_TAG" '
+            all(
+              .platforms[];
+              (.signature | type == "string" and length > 0)
+              and
+              (.url
+                | type == "string"
+                  and contains("/releases/download/" + $tag + "/"))
+            )
+          ' "$manifest"
+
+          echo "Verified Koma $RELEASE_TAG release assets:"
+          echo "$assets"

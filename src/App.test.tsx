@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { backend } from "./lib/backend";
 import { useKomaStore } from "./store/koma";
 
 const initialState = useKomaStore.getInitialState();
@@ -15,6 +16,7 @@ async function renderKoma() {
 beforeEach(() => {
   localStorage.clear();
   document.documentElement.removeAttribute("data-theme");
+  document.documentElement.removeAttribute("data-platform");
   useKomaStore.setState(
     {
       ...initialState,
@@ -40,6 +42,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   cleanup();
 });
 
@@ -113,6 +116,89 @@ describe("Koma application workflows", () => {
 
     expect(await screen.findByText("Page note saved")).toBeInTheDocument();
     expect(screen.getByText("Composition")).toBeInTheDocument();
+  });
+
+  it("opens a publication with one tap and removes desktop reader chrome on mobile", async () => {
+    await renderKoma();
+    const bootstrap = useKomaStore.getState().bootstrap;
+    expect(bootstrap).not.toBeNull();
+    if (bootstrap === null) return;
+    document.documentElement.dataset.platform = "ios";
+    useKomaStore.setState({
+      bootstrap: { ...bootstrap, platform: "ios" },
+      route: "library",
+    });
+
+    await userEvent.click(
+      await screen.findByRole("article", { name: "After the Last Train" }),
+    );
+
+    expect(
+      await screen.findByLabelText("Reading After the Last Train"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Fullscreen" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("imports mobile publications and connectors without filesystem paths", async () => {
+    await renderKoma();
+    const state = useKomaStore.getState();
+    const template = state.items[0];
+    if (template === undefined || state.bootstrap === null) {
+      throw new Error("Demo state is unavailable");
+    }
+    useKomaStore.setState({
+      bootstrap: { ...state.bootstrap, platform: "ios" },
+    });
+    const publication = new File(["comic"], "Mobile Volume.cbz", {
+      type: "application/zip",
+    });
+    vi.spyOn(backend, "pickPublicationUploads").mockResolvedValue([publication]);
+    vi.spyOn(backend, "uploadPublication").mockResolvedValue({
+      ...template,
+      id: "mobile-publication",
+      path: "/Documents/Koma/Mobile Volume.cbz",
+      title: "Mobile Volume",
+    });
+
+    await act(() => useKomaStore.getState().addFiles());
+    expect(
+      useKomaStore.getState().items.some((item) => item.id === "mobile-publication"),
+    ).toBe(true);
+
+    const connectorFile = new File(["{}"], "mobile.koma-connector.json", {
+      type: "application/json",
+    });
+    const connector = {
+      id: "mobile-connector",
+      name: "Mobile connector",
+      version: "2",
+      description: null,
+      kind: "declarative" as const,
+      enabled: true,
+      removable: true,
+      schemaVersion: 2,
+      runsCode: false,
+      capabilities: ["chapter"] as Array<"chapter" | "volume" | "series">,
+    };
+    vi.spyOn(backend, "pickConnectorUpload").mockResolvedValue(connectorFile);
+    vi.spyOn(backend, "inspectConnectorUpload").mockResolvedValue({
+      installToken: "mobile-token",
+      connector,
+      allowedRequestHosts: ["example.com"],
+      allowedPageHosts: ["cdn.example.com"],
+      allowLocalNetwork: false,
+    });
+    vi.spyOn(backend, "installConnectorPackage").mockResolvedValue(connector);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await act(() => useKomaStore.getState().importConnector());
+    expect(
+      useKomaStore
+        .getState()
+        .connectors.some((candidate) => candidate.id === "mobile-connector"),
+    ).toBe(true);
   });
 
   it("requires permission confirmation before packaging an imported volume", async () => {

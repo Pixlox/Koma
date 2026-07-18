@@ -3,6 +3,10 @@ import fs from "node:fs";
 const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
 const packageLock = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
 const tauri = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+const releaseWorkflow = fs.readFileSync(
+  ".github/workflows/release.yml",
+  "utf8",
+);
 const cargo = fs.readFileSync("Cargo.toml", "utf8");
 const cargoVersion = cargo.match(
   /\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/,
@@ -34,6 +38,20 @@ if (typeof updater?.pubkey !== "string" || updater.pubkey.length < 100) {
 }
 if (tauri.bundle?.createUpdaterArtifacts !== true) {
   errors.push("updater artifacts are disabled");
+}
+const requiredReleaseSettings = [
+  ["Tauri release action", "uses: tauri-apps/tauri-action@v1"],
+  ["updater JSON upload", "uploadUpdaterJson: true"],
+  ["updater signature upload", "uploadUpdaterSignatures: true"],
+  ["Windows installers", "bundles: nsis,msi"],
+  ["macOS installers", "bundles: app,dmg"],
+  ["Linux installers", "bundles: appimage,deb,rpm"],
+  ["release asset verification", "name: Verify release assets"],
+];
+for (const [description, setting] of requiredReleaseSettings) {
+  if (!releaseWorkflow.includes(setting)) {
+    errors.push(`${description} is missing from the release workflow`);
+  }
 }
 const requiredIcons = [
   "icons/32x32.png",

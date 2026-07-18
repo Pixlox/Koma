@@ -44,6 +44,7 @@ export function ToolsPanel() {
   const addImportedItem = useKomaStore((state) => state.addImportedItem);
   const requestPassword = useKomaStore((state) => state.requestPassword);
   const notify = useKomaStore((state) => state.notify);
+  const bootstrap = useKomaStore((state) => state.bootstrap);
   const [tab, setTab] = useState<ToolTab>("health");
   const [inspection, setInspection] = useState<PublicationInspection | null>(null);
   const [metadata, setMetadata] = useState<PublicationMetadata | null>(null);
@@ -110,9 +111,12 @@ export function ToolsPanel() {
 
   const runConversion = async (repair: boolean) => {
     const suffix = repair ? tr("repaired") : tr("converted");
-    const destination = await backend.pickCbzDestination(
-      `${safeFileName(item.title)} (${suffix}).cbz`,
-    );
+    const fileName = `${safeFileName(item.title)} (${suffix}).cbz`;
+    const mobile =
+      bootstrap?.platform === "ios" || bootstrap?.platform === "android";
+    const destination = mobile
+      ? `${bootstrap.defaultImportDirectory}/${fileName}`
+      : await backend.pickCbzDestination(fileName);
     if (destination === null) return;
     setBusy(repair ? "Repairing publication…" : "Converting publication…");
     setError(null);

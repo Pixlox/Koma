@@ -42,4 +42,35 @@ if (nextCargo === cargo) {
   throw new Error("workspace package version was not found");
 }
 fs.writeFileSync(cargoPath, nextCargo);
+
+const appleInfoPath = path.join(
+  root,
+  "src-tauri/gen/apple/koma_iOS/Info.plist",
+);
+if (fs.existsSync(appleInfoPath)) {
+  const appleInfo = fs.readFileSync(appleInfoPath, "utf8");
+  const nextAppleInfo = appleInfo
+    .replace(
+      /(<key>CFBundleShortVersionString<\/key>\s*<string>)[^<]+/,
+      `$1${version}`,
+    )
+    .replace(
+      /(<key>CFBundleVersion<\/key>\s*<string>)[^<]+/,
+      `$1${version}`,
+    );
+  fs.writeFileSync(appleInfoPath, nextAppleInfo);
+}
+
+const appleProjectPath = path.join(root, "src-tauri/gen/apple/project.yml");
+if (fs.existsSync(appleProjectPath)) {
+  const appleProject = fs.readFileSync(appleProjectPath, "utf8");
+  const nextAppleProject = appleProject
+    .replace(
+      /(CFBundleShortVersionString:\s*)[^\s]+/,
+      `$1${version}`,
+    )
+    .replace(/(CFBundleVersion:\s*)"[^"]+"/, `$1"${version}"`);
+  fs.writeFileSync(appleProjectPath, nextAppleProject);
+}
+
 console.log(`Koma version set to ${version}`);

@@ -6,6 +6,7 @@ import { closePdf, renderPdfPage } from "../lib/pdf";
 import type {
   Bookmark,
   BootstrapPayload,
+  ConnectorPackagePreview,
   ConnectorSummary,
   LibraryItem,
   LibraryFolder,
@@ -269,6 +270,25 @@ export const useKomaStore = create<KomaState>((set, get) => ({
         "danger",
       );
     }
+    if (payload.platform === "ios" || payload.platform === "android") {
+      try {
+        const report = await backend.scanFolder(payload.defaultImportDirectory);
+        if (report.imported.length > 0) {
+          set((state) => {
+            const importedIds = new Set(report.imported.map((item) => item.id));
+            return {
+              items: [
+                ...report.imported,
+                ...state.items.filter((item) => !importedIds.has(item.id)),
+              ],
+              selectedId: report.imported[0]?.id ?? state.selectedId,
+            };
+          });
+        }
+      } catch {
+        // The visible Scan folder action remains available as a manual fallback.
+      }
+    }
   },
 
   reloadLibrary: async () => {
@@ -380,6 +400,44 @@ export const useKomaStore = create<KomaState>((set, get) => ({
 
   addFiles: async () => {
     try {
+      const platform = get().bootstrap?.platform;
+      const mobile = platform === "ios" || platform === "android";
+      if (mobile) {
+        const files = await backend.pickPublicationUploads();
+        let imported = 0;
+        let failed = 0;
+        for (const file of files) {
+          try {
+            const item = await backend.uploadPublication(file);
+            set((state) => ({
+              items: [
+                item,
+                ...state.items.filter((candidate) => candidate.id !== item.id),
+              ],
+              selectedId: item.id,
+              route: "library",
+            }));
+            imported += 1;
+          } catch (error) {
+            failed += 1;
+            get().notify(
+              tr("Could not add {{name}}", { name: file.name }),
+              errorMessage(error),
+              "warning",
+            );
+          }
+        }
+        if (imported > 0) {
+          get().notify(
+            tr("{{count}} publications added", { count: imported }),
+            failed > 0
+              ? tr("{{count}} items could not be added", { count: failed })
+              : undefined,
+            failed > 0 ? "warning" : "success",
+          );
+        }
+        return;
+      }
       const paths = await backend.pickPublications();
       if (paths.length === 0) {
         if (backend.kind === "preview") {
@@ -399,7 +457,12 @@ export const useKomaStore = create<KomaState>((set, get) => ({
 
   addFolder: async () => {
     try {
-      const path = await backend.pickFolder();
+      const bootstrap = get().bootstrap;
+      const mobile =
+        bootstrap?.platform === "ios" || bootstrap?.platform === "android";
+      const path = mobile
+        ? bootstrap.defaultImportDirectory
+        : await backend.pickFolder();
       if (path === null) {
         if (backend.kind === "preview") {
           get().notify(
@@ -564,14 +627,26 @@ export const useKomaStore = create<KomaState>((set, get) => ({
 
   importConnector: async () => {
     try {
-      const path = await backend.pickConnectorPackage();
-      if (path === null) {
-        if (backend.kind === "preview") {
-          get().notify(tr("Connector import"), tr("Available in the desktop app."));
+      const platform = get().bootstrap?.platform;
+      const mobile = platform === "ios" || platform === "android";
+      let preview: ConnectorPackagePreview;
+      if (mobile) {
+        const file = await backend.pickConnectorUpload();
+        if (file === null) return;
+        preview = await backend.inspectConnectorUpload(file);
+      } else {
+        const path = await backend.pickConnectorPackage();
+        if (path === null) {
+          if (backend.kind === "preview") {
+            get().notify(
+              tr("Connector import"),
+              tr("Available in the desktop app."),
+            );
+          }
+          return;
         }
-        return;
+        preview = await backend.inspectConnectorPackage(path);
       }
-      const preview = await backend.inspectConnectorPackage(path);
       const hosts = [
         ...new Set([
           ...preview.allowedRequestHosts,
@@ -593,7 +668,7 @@ export const useKomaStore = create<KomaState>((set, get) => ({
         )}${localNetwork}${codeWarning}`,
       );
       if (!accepted) return;
-      const connector = await backend.installConnectorPackage(path);
+      const connector = await backend.installConnectorPackage(preview.installToken);
       set((state) => ({
         connectors: [
           ...state.connectors.filter((candidate) => candidate.id !== connector.id),
@@ -1168,7 +1243,13 @@ export const useKomaStore = create<KomaState>((set, get) => ({
 
   exportBackup: async () => {
     try {
-      const destination = await backend.pickBackupDestination();
+      const bootstrap = get().bootstrap;
+      const mobile =
+        bootstrap?.platform === "ios" || bootstrap?.platform === "android";
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const destination = mobile
+        ? `${bootstrap.defaultImportDirectory}/Koma Library Backup ${timestamp}.koma-backup.json`
+        : await backend.pickBackupDestination();
       if (destination === null) {
         if (backend.kind === "preview") {
           get().notify(

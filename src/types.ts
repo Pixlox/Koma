@@ -185,6 +185,7 @@ export interface ConnectorSummary {
 }
 
 export interface ConnectorPackagePreview {
+  installToken: string;
   connector: ConnectorSummary;
   allowedRequestHosts: string[];
   allowedPageHosts: string[];

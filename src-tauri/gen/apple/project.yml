@@ -41,6 +41,37 @@ targets:
       properties:
         LSRequiresIPhoneOS: true
         UILaunchStoryboardName: LaunchScreen
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Comics and books
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - me.pixlox.koma.comic-archive
+              - public.zip-archive
+              - com.adobe.pdf
+              - org.idpf.epub-container
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: me.pixlox.koma.comic-archive
+            UTTypeDescription: Comic book archive
+            UTTypeConformsTo:
+              - public.archive
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - cbz
+                - cbr
+                - cb7
+                - cbt
+                - zip
+                - rar
+                - 7z
+                - tar
+                - tgz
+                - tbz
+                - tbz2
+                - txz
         UIRequiredDeviceCapabilities: [arm64, metal]
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -51,8 +82,8 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 0.1.0
-        CFBundleVersion: "0.1.0"
+        CFBundleShortVersionString: 0.1.1
+        CFBundleVersion: "0.1.1"
     entitlements:
       path: koma_iOS/koma_iOS.entitlements
     scheme:

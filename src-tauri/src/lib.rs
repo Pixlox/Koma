@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -25,6 +26,8 @@ struct AppState {
     library: Arc<Library>,
     importer: Arc<MangaFireImporter>,
     connectors: Mutex<Vec<Arc<DeclarativeImporter>>>,
+    pending_connector_packages: Mutex<HashMap<Uuid, Vec<u8>>>,
+    pending_file_uploads: Mutex<HashMap<Uuid, PendingFileUpload>>,
     connectors_directory: PathBuf,
     readers: Mutex<HashMap<Uuid, Arc<dyn PublicationReader>>>,
     pending_open_paths: Mutex<Vec<PathBuf>>,
@@ -32,6 +35,13 @@ struct AppState {
     managed_library_directory: PathBuf,
     #[cfg(desktop)]
     discord: Mutex<Option<DiscordIpcClient>>,
+}
+
+struct PendingFileUpload {
+    temporary_path: PathBuf,
+    file_name: String,
+    expected_size: u64,
+    received_size: u64,
 }
 
 impl AppState {
@@ -50,6 +60,8 @@ impl AppState {
             library: Arc::new(Library::open(database_path)?),
             importer: Arc::new(MangaFireImporter::new()?),
             connectors: Mutex::new(connectors),
+            pending_connector_packages: Mutex::new(HashMap::new()),
+            pending_file_uploads: Mutex::new(HashMap::new()),
             connectors_directory,
             readers: Mutex::new(HashMap::new()),
             pending_open_paths: Mutex::new(pending_open_paths),
@@ -114,6 +126,38 @@ impl AppState {
     }
 }
 
+fn safe_import_file_name(file_name: &str) -> Result<String, KomaError> {
+    let file_name = Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| KomaError::Other("the selected file has no usable name".to_owned()))?;
+    if file_name.starts_with('.') {
+        return Err(KomaError::Other(
+            "hidden files cannot be imported".to_owned(),
+        ));
+    }
+    Ok(file_name.to_owned())
+}
+
+fn unique_managed_destination(directory: &Path, file_name: &str) -> PathBuf {
+    let source_stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Imported comic");
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("cbz");
+    let mut destination = directory.join(file_name);
+    let mut suffix = 2_u32;
+    while destination.exists() {
+        destination = directory.join(format!("{source_stem} {suffix}.{extension}"));
+        suffix += 1;
+    }
+    destination
+}
+
 fn load_connector(path: &Path) -> Result<Arc<DeclarativeImporter>, KomaError> {
     #[cfg(target_os = "ios")]
     {
@@ -138,7 +182,16 @@ fn load_connector_file(path: &Path) -> Result<Arc<DeclarativeImporter>, KomaErro
             "connector package must be a file smaller than 1 MiB".to_owned(),
         ));
     }
-    let manifest = ConnectorManifest::from_json(&std::fs::read(path)?)?;
+    connector_from_bytes(&std::fs::read(path)?)
+}
+
+fn connector_from_bytes(bytes: &[u8]) -> Result<Arc<DeclarativeImporter>, KomaError> {
+    if bytes.len() > 1024 * 1024 {
+        return Err(KomaError::ImportDenied(
+            "connector package must be smaller than 1 MiB".to_owned(),
+        ));
+    }
+    let manifest = ConnectorManifest::from_json(bytes)?;
     if manifest.id == "mangafire" {
         return Err(KomaError::ImportDenied(
             "the bundled MangaFire connector cannot be replaced".to_owned(),
@@ -154,13 +207,23 @@ fn read_connector_file(path: &Path) -> Result<Vec<u8>, KomaError> {
         let path_string = NSString::from_str(&path.to_string_lossy());
         let url = NSURL::fileURLWithPath(&path_string);
         let active = unsafe { url.startAccessingSecurityScopedResource() };
-        let result = std::fs::read(path).map_err(KomaError::from);
+        let result = read_connector_file_unscoped(path);
         if active {
             unsafe { url.stopAccessingSecurityScopedResource() };
         }
         return result;
     }
     #[cfg(not(target_os = "ios"))]
+    read_connector_file_unscoped(path)
+}
+
+fn read_connector_file_unscoped(path: &Path) -> Result<Vec<u8>, KomaError> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return Err(KomaError::ImportDenied(
+            "connector package must be a file smaller than 1 MiB".to_owned(),
+        ));
+    }
     Ok(std::fs::read(path)?)
 }
 
@@ -358,6 +421,7 @@ struct LibraryFolderScanResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectorPackagePreview {
+    install_token: Uuid,
     connector: ConnectorSummary,
     allowed_request_hosts: Vec<String>,
     allowed_page_hosts: Vec<String>,
@@ -422,7 +486,138 @@ async fn add_publication(
     .map_err(Into::into)
 }
 
-#[cfg(mobile)]
+#[tauri::command]
+fn begin_file_upload(
+    state: State<'_, AppState>,
+    file_name: String,
+    expected_size: u64,
+) -> Result<Uuid, CommandError> {
+    const MAX_UPLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+    if expected_size == 0 || expected_size > MAX_UPLOAD_BYTES {
+        return Err(KomaError::Other(
+            "the selected file is empty or exceeds Koma's 4 GiB limit".to_owned(),
+        )
+        .into());
+    }
+    let file_name = safe_import_file_name(&file_name)?;
+    let incoming_directory = state.managed_library_directory.join(".incoming");
+    std::fs::create_dir_all(&incoming_directory)?;
+    let upload_id = Uuid::now_v7();
+    let temporary_path = incoming_directory.join(format!("{upload_id}.part"));
+    std::fs::File::create(&temporary_path)?;
+    state
+        .pending_file_uploads
+        .lock()
+        .map_err(|_| KomaError::Other("the upload registry lock was poisoned".to_owned()))?
+        .insert(
+            upload_id,
+            PendingFileUpload {
+                temporary_path,
+                file_name,
+                expected_size,
+                received_size: 0,
+            },
+        );
+    Ok(upload_id)
+}
+
+#[tauri::command]
+fn append_file_upload(
+    state: State<'_, AppState>,
+    upload_id: Uuid,
+    chunk: String,
+) -> Result<u64, CommandError> {
+    const MAX_CHUNK_BYTES: usize = 1024 * 1024;
+    let bytes = STANDARD
+        .decode(chunk)
+        .map_err(|error| KomaError::Other(format!("invalid upload chunk: {error}")))?;
+    if bytes.is_empty() || bytes.len() > MAX_CHUNK_BYTES {
+        return Err(KomaError::Other("invalid upload chunk size".to_owned()).into());
+    }
+    let mut uploads = state
+        .pending_file_uploads
+        .lock()
+        .map_err(|_| KomaError::Other("the upload registry lock was poisoned".to_owned()))?;
+    let upload = uploads.get_mut(&upload_id).ok_or_else(|| {
+        KomaError::Other("the mobile file upload expired; choose the file again".to_owned())
+    })?;
+    let next_size = upload.received_size.saturating_add(bytes.len() as u64);
+    if next_size > upload.expected_size {
+        return Err(
+            KomaError::Other("the uploaded file was larger than expected".to_owned()).into(),
+        );
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&upload.temporary_path)?;
+    file.write_all(&bytes)?;
+    upload.received_size = next_size;
+    Ok(next_size)
+}
+
+#[tauri::command]
+async fn finish_publication_upload(
+    state: State<'_, AppState>,
+    upload_id: Uuid,
+    password: Option<String>,
+) -> Result<LibraryItem, CommandError> {
+    let upload = state
+        .pending_file_uploads
+        .lock()
+        .map_err(|_| KomaError::Other("the upload registry lock was poisoned".to_owned()))?
+        .remove(&upload_id)
+        .ok_or_else(|| {
+            KomaError::Other("the mobile file upload expired; choose the file again".to_owned())
+        })?;
+    if upload.received_size != upload.expected_size {
+        let _ = std::fs::remove_file(&upload.temporary_path);
+        return Err(KomaError::Other(format!(
+            "the file upload stopped at {} of {} bytes",
+            upload.received_size, upload.expected_size
+        ))
+        .into());
+    }
+    let library = Arc::clone(&state.library);
+    let managed_directory = state.managed_library_directory.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&upload.temporary_path)?
+            .sync_all()?;
+        let destination = unique_managed_destination(&managed_directory, &upload.file_name);
+        std::fs::rename(&upload.temporary_path, &destination)?;
+        match library.import_path(&destination, password.as_deref()) {
+            Ok(item) => Ok(item),
+            Err(error) => {
+                let _ = std::fs::remove_file(destination);
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|error| CommandError {
+        code: "operation_failed",
+        message: format!("file import task failed: {error}"),
+        recoverable: true,
+    })?
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+fn cancel_file_upload(state: State<'_, AppState>, upload_id: Uuid) -> Result<bool, CommandError> {
+    let upload = state
+        .pending_file_uploads
+        .lock()
+        .map_err(|_| KomaError::Other("the upload registry lock was poisoned".to_owned()))?
+        .remove(&upload_id);
+    if let Some(upload) = upload {
+        let _ = std::fs::remove_file(upload.temporary_path);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+#[cfg(any(mobile, test))]
 fn copy_into_managed_library(source: &Path, directory: &Path) -> Result<PathBuf, KomaError> {
     if source.starts_with(directory) {
         return Ok(source.to_owned());
@@ -433,20 +628,7 @@ fn copy_into_managed_library(source: &Path, directory: &Path) -> Result<PathBuf,
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("Imported comic.cbz");
-    let source_stem = Path::new(file_name)
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Imported comic");
-    let extension = Path::new(file_name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("cbz");
-    let mut destination = directory.join(file_name);
-    let mut suffix = 2_u32;
-    while destination.exists() {
-        destination = directory.join(format!("{source_stem} {suffix}.{extension}"));
-        suffix += 1;
-    }
+    let destination = unique_managed_destination(directory, file_name);
 
     #[cfg(target_os = "ios")]
     let (security_scoped_url, security_scope_active) = {
@@ -755,10 +937,44 @@ fn list_connectors(state: State<'_, AppState>) -> Result<Vec<ConnectorSummary>, 
 }
 
 #[tauri::command]
-fn inspect_connector_package(path: PathBuf) -> Result<ConnectorPackagePreview, CommandError> {
-    let connector = load_connector(&path)?;
+fn inspect_connector_package(
+    state: State<'_, AppState>,
+    path: PathBuf,
+) -> Result<ConnectorPackagePreview, CommandError> {
+    let bytes = read_connector_file(&path)?;
+    let connector = connector_from_bytes(&bytes)?;
     let manifest = connector.manifest();
+    let install_token = Uuid::now_v7();
+    let mut pending = state.pending_connector_packages.lock().map_err(|_| {
+        KomaError::Other("the pending connector package lock was poisoned".to_owned())
+    })?;
+    pending.clear();
+    pending.insert(install_token, bytes);
     Ok(ConnectorPackagePreview {
+        install_token,
+        connector: manifest.summary(),
+        allowed_request_hosts: manifest.allowed_request_hosts.clone(),
+        allowed_page_hosts: manifest.allowed_page_hosts.clone(),
+        allow_local_network: manifest.allow_local_network,
+    })
+}
+
+#[tauri::command]
+fn inspect_connector_contents(
+    state: State<'_, AppState>,
+    contents: String,
+) -> Result<ConnectorPackagePreview, CommandError> {
+    let bytes = contents.into_bytes();
+    let connector = connector_from_bytes(&bytes)?;
+    let manifest = connector.manifest();
+    let install_token = Uuid::now_v7();
+    let mut pending = state.pending_connector_packages.lock().map_err(|_| {
+        KomaError::Other("the pending connector package lock was poisoned".to_owned())
+    })?;
+    pending.clear();
+    pending.insert(install_token, bytes);
+    Ok(ConnectorPackagePreview {
+        install_token,
         connector: manifest.summary(),
         allowed_request_hosts: manifest.allowed_request_hosts.clone(),
         allowed_page_hosts: manifest.allowed_page_hosts.clone(),
@@ -769,9 +985,21 @@ fn inspect_connector_package(path: PathBuf) -> Result<ConnectorPackagePreview, C
 #[tauri::command]
 fn install_connector_package(
     state: State<'_, AppState>,
-    path: PathBuf,
+    install_token: Uuid,
 ) -> Result<ConnectorSummary, CommandError> {
-    let connector = load_connector(&path)?;
+    let bytes = state
+        .pending_connector_packages
+        .lock()
+        .map_err(|_| {
+            KomaError::Other("the pending connector package lock was poisoned".to_owned())
+        })?
+        .remove(&install_token)
+        .ok_or_else(|| {
+            KomaError::ImportDenied(
+                "the connector approval expired; choose the connector again".to_owned(),
+            )
+        })?;
+    let connector = connector_from_bytes(&bytes)?;
     let manifest = connector.manifest();
     let summary = manifest.summary();
     std::fs::create_dir_all(&state.connectors_directory)?;
@@ -782,7 +1010,7 @@ fn install_connector_package(
         state
             .connectors_directory
             .join(format!(".{}.{}.tmp", manifest.id, Uuid::now_v7()));
-    std::fs::write(&temporary, read_connector_file(&path)?)?;
+    std::fs::write(&temporary, bytes)?;
 
     let previous = state
         .connectors_directory
@@ -1111,7 +1339,15 @@ async fn save_publication_metadata(
 fn setup_state(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_directory = app.path().app_data_dir()?;
     std::fs::create_dir_all(&data_directory)?;
+    #[cfg(not(mobile))]
     let managed_library_directory = data_directory.join("Library");
+    #[cfg(mobile)]
+    let managed_library_directory = app.path().document_dir()?.join("Koma");
+    std::fs::create_dir_all(&managed_library_directory)?;
+    let incoming_directory = managed_library_directory.join(".incoming");
+    if incoming_directory.exists() {
+        std::fs::remove_dir_all(&incoming_directory)?;
+    }
     #[cfg(not(mobile))]
     let default_import_directory = app
         .path()
@@ -1184,6 +1420,32 @@ fn scan_registered_folder(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::copy_into_managed_library;
+
+    #[test]
+    fn mobile_imports_are_copied_to_unique_managed_paths() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let incoming = root.path().join("Incoming");
+        let managed = root.path().join("Documents").join("Koma");
+        std::fs::create_dir_all(&incoming).expect("incoming directory");
+        let source = incoming.join("Volume.cbz");
+        std::fs::write(&source, b"comic").expect("source file");
+
+        let first = copy_into_managed_library(&source, &managed).expect("first copy");
+        let second = copy_into_managed_library(&source, &managed).expect("second copy");
+
+        assert_eq!(first, managed.join("Volume.cbz"));
+        assert_eq!(second, managed.join("Volume 2.cbz"));
+        assert_eq!(std::fs::read(first).expect("copied bytes"), b"comic");
+        assert_eq!(
+            copy_into_managed_library(&second, &managed).expect("managed source"),
+            second
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -1212,6 +1474,10 @@ pub fn run() {
             list_library,
             take_open_paths,
             add_publication,
+            begin_file_upload,
+            append_file_upload,
+            finish_publication_upload,
+            cancel_file_upload,
             relink_publication,
             scan_folder,
             list_library_folders,
@@ -1231,6 +1497,7 @@ pub fn run() {
             remove_bookmark,
             list_connectors,
             inspect_connector_package,
+            inspect_connector_contents,
             install_connector_package,
             remove_connector,
             preview_link,
@@ -1249,11 +1516,31 @@ pub fn run() {
         .run(|_app, _event| {
             #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
             if let tauri::RunEvent::Opened { urls } = _event {
-                let paths = urls
+                let paths: Vec<PathBuf> = urls
                     .into_iter()
                     .filter_map(|url| url.to_file_path().ok())
                     .filter(|path| path.is_dir() || PublicationFormat::from_path(path).is_some())
                     .collect();
+                #[cfg(target_os = "ios")]
+                let paths = {
+                    let state = _app.state::<AppState>();
+                    paths
+                        .into_iter()
+                        .filter_map(|path| {
+                            match copy_into_managed_library(&path, &state.managed_library_directory)
+                            {
+                                Ok(managed) => Some(managed),
+                                Err(error) => {
+                                    eprintln!(
+                                        "Koma could not copy opened publication {}: {error}",
+                                        path.display()
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                        .collect()
+                };
                 queue_open_paths(_app, paths);
             }
         });

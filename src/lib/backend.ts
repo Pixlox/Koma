@@ -47,10 +47,14 @@ export interface KomaBackend {
   onOpenPaths(handler: () => void): Promise<UnlistenFn>;
   onLibraryChanged(handler: () => void): Promise<UnlistenFn>;
   onFileDrop(handler: (event: FileDropState) => void): Promise<UnlistenFn>;
+  pickPublicationUploads(): Promise<File[]>;
+  uploadPublication(file: File, password?: string): Promise<LibraryItem>;
   pickPublications(): Promise<string[]>;
   pickRelinkSource(): Promise<string | null>;
   pickFolder(): Promise<string | null>;
   pickConnectorPackage(): Promise<string | null>;
+  pickConnectorUpload(): Promise<File | null>;
+  inspectConnectorUpload(file: File): Promise<ConnectorPackagePreview>;
   pickBackupDestination(): Promise<string | null>;
   pickBackupSource(): Promise<string | null>;
   pickCbzDestination(suggestedName: string): Promise<string | null>;
@@ -142,6 +146,40 @@ export type FileDropState =
   | { type: "drop"; paths: string[] }
   | { type: "cancel" };
 
+function pickBrowserFiles(accept: string, multiple: boolean): Promise<File[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = accept;
+    input.multiple = multiple;
+    input.style.display = "none";
+    document.body.append(input);
+    let settled = false;
+    const finish = (files: File[]) => {
+      if (settled) return;
+      settled = true;
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener(
+      "change",
+      () => finish(Array.from(input.files ?? [])),
+      { once: true },
+    );
+    input.addEventListener("cancel", () => finish([]), { once: true });
+    input.click();
+  });
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const stride = 32 * 1024;
+  for (let offset = 0; offset < bytes.length; offset += stride) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + stride));
+  }
+  return btoa(binary);
+}
+
 class NativeBackend implements KomaBackend {
   readonly kind = "native" as const;
 
@@ -180,14 +218,48 @@ class NativeBackend implements KomaBackend {
     });
   }
 
+  pickPublicationUploads() {
+    return pickBrowserFiles(
+      ".cbz,.zip,.cbr,.rar,.cb7,.7z,.cbt,.tar,.tgz,.tbz,.tbz2,.txz,.epub,.pdf",
+      true,
+    );
+  }
+
+  async uploadPublication(file: File, password?: string) {
+    const uploadId = await invoke<string>("begin_file_upload", {
+      fileName: file.name,
+      expectedSize: file.size,
+    });
+    try {
+      const chunkSize = 512 * 1024;
+      for (let offset = 0; offset < file.size; offset += chunkSize) {
+        const bytes = new Uint8Array(
+          await file.slice(offset, offset + chunkSize).arrayBuffer(),
+        );
+        await invoke<number>("append_file_upload", {
+          uploadId,
+          chunk: bytesToBase64(bytes),
+        });
+      }
+      return await invoke<LibraryItem>("finish_publication_upload", {
+        uploadId,
+        password: password ?? null,
+      });
+    } catch (error) {
+      await invoke<boolean>("cancel_file_upload", { uploadId }).catch(
+        () => false,
+      );
+      throw error;
+    }
+  }
+
   async pickPublications() {
-    const ios = document.documentElement.dataset.platform === "ios";
     const selection = await open({
       title: tr("Add comics to Koma"),
       multiple: true,
       directory: false,
       pickerMode: "document",
-      fileAccessMode: ios ? "scoped" : "copy",
+      fileAccessMode: "copy",
       filters: [
         {
           name: tr("Comics and books"),
@@ -215,13 +287,12 @@ class NativeBackend implements KomaBackend {
   }
 
   async pickRelinkSource() {
-    const ios = document.documentElement.dataset.platform === "ios";
     const selection = await open({
       title: tr("Find the moved publication"),
       multiple: false,
       directory: false,
       pickerMode: "document",
-      fileAccessMode: ios ? "scoped" : "copy",
+      fileAccessMode: "copy",
       filters: [
         {
           name: tr("Comics and books"),
@@ -258,13 +329,12 @@ class NativeBackend implements KomaBackend {
   }
 
   async pickConnectorPackage() {
-    const ios = document.documentElement.dataset.platform === "ios";
     const selection = await open({
       title: tr("Import Koma connector"),
       directory: false,
       multiple: false,
       pickerMode: "document",
-      fileAccessMode: ios ? "scoped" : "copy",
+      fileAccessMode: "copy",
       filters: [
         {
           name: tr("Koma connector"),
@@ -273,6 +343,20 @@ class NativeBackend implements KomaBackend {
       ],
     });
     return typeof selection === "string" ? selection : null;
+  }
+
+  async pickConnectorUpload() {
+    const files = await pickBrowserFiles(
+      ".koma-connector.json,.json,application/json",
+      false,
+    );
+    return files[0] ?? null;
+  }
+
+  async inspectConnectorUpload(file: File) {
+    return invoke<ConnectorPackagePreview>("inspect_connector_contents", {
+      contents: await file.text(),
+    });
   }
 
   pickBackupDestination() {
@@ -288,6 +372,8 @@ class NativeBackend implements KomaBackend {
       title: tr("Restore Koma library backup"),
       directory: false,
       multiple: false,
+      pickerMode: "document",
+      fileAccessMode: "copy",
       filters: [{ name: tr("Koma backup"), extensions: ["json"] }],
     });
     return typeof selection === "string" ? selection : null;
@@ -363,8 +449,8 @@ class NativeBackend implements KomaBackend {
     return invoke<ConnectorPackagePreview>("inspect_connector_package", { path });
   }
 
-  installConnectorPackage(path: string) {
-    return invoke<ConnectorSummary>("install_connector_package", { path });
+  installConnectorPackage(installToken: string) {
+    return invoke<ConnectorSummary>("install_connector_package", { installToken });
   }
 
   removeConnector(connectorId: string) {
@@ -569,6 +655,14 @@ class PreviewBackend implements KomaBackend {
     return Promise.resolve(() => undefined);
   }
 
+  pickPublicationUploads() {
+    return Promise.resolve([]);
+  }
+
+  uploadPublication(file: File) {
+    return this.addPublication(`/Preview/${file.name}`);
+  }
+
   pickPublications() {
     return Promise.resolve([]);
   }
@@ -582,6 +676,10 @@ class PreviewBackend implements KomaBackend {
   }
 
   pickConnectorPackage() {
+    return Promise.resolve(null);
+  }
+
+  pickConnectorUpload() {
     return Promise.resolve(null);
   }
 
@@ -724,6 +822,15 @@ class PreviewBackend implements KomaBackend {
   }
 
   inspectConnectorPackage(): Promise<ConnectorPackagePreview> {
+    return Promise.reject(
+      commandError(
+        "operation_failed",
+        tr("Connector packages require the desktop app."),
+      ),
+    );
+  }
+
+  inspectConnectorUpload(): Promise<ConnectorPackagePreview> {
     return Promise.reject(
       commandError(
         "operation_failed",

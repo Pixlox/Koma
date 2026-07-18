@@ -5,6 +5,14 @@ import App from "./App";
 import "./i18n";
 import "./styles.css";
 
+const isIPad =
+  /\biPad\b/i.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+if (isIPad) {
+  document.documentElement.dataset.formFactor = "ipad";
+}
+
 const root = document.getElementById("root");
 
 if (root === null) {

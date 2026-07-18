@@ -104,6 +104,11 @@ function resolvedDirection(
   return metadataDirection === "automatic" ? "leftToRight" : metadataDirection;
 }
 
+function compactPhoneViewport(): boolean {
+  const media = window.matchMedia?.("(max-width: 560px)");
+  return media?.matches ?? window.innerWidth <= 560;
+}
+
 export function Reader() {
   const reader = useKomaStore((state) => state.reader);
   const closeReader = useKomaStore((state) => state.closeReader);
@@ -117,6 +122,8 @@ export function Reader() {
   const saveAnnotation = useKomaStore((state) => state.saveReaderAnnotation);
   const removeBookmark = useKomaStore((state) => state.removeReaderBookmark);
   const notify = useKomaStore((state) => state.notify);
+  const platform = useKomaStore((state) => state.bootstrap?.platform);
+  const mobile = platform === "ios" || platform === "android";
   const hideTimer = useRef<number | null>(null);
   const wheelNavigationAt = useRef(0);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -138,12 +145,16 @@ export function Reader() {
   const [guidedStep, setGuidedStep] = useState(0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [fullscreen, setFullscreen] = useState(false);
+  const [compactPhone, setCompactPhone] = useState(compactPhoneViewport);
 
   const manifest = reader?.payload.manifest ?? null;
   const pageCount = manifest?.pages.length ?? 0;
   const readerId = reader?.payload.libraryId;
   const currentPage = reader?.currentPage;
-  const readerMode = reader?.settings.mode;
+  const readerMode =
+    compactPhone && reader?.settings.mode === "spreads"
+      ? "singlePage"
+      : reader?.settings.mode;
   const keepAwake = reader?.settings.keepAwake ?? false;
   const direction =
     reader === null || manifest === null
@@ -160,7 +171,7 @@ export function Reader() {
     if (reader.settings.mode === "guided" && reader.currentPage > 0) {
       setGuidedStep(3);
     }
-    if (reader.settings.mode === "spreads" && manifest !== null) {
+    if (readerMode === "spreads" && manifest !== null) {
       const groups = spreadGroups(manifest.pages);
       const index = spreadIndexForPage(groups, reader.currentPage);
       const target = groups[Math.max(0, index - 1)]?.[0];
@@ -176,7 +187,7 @@ export function Reader() {
       return;
     }
     if (reader.settings.mode === "guided") setGuidedStep(0);
-    if (reader.settings.mode === "spreads" && manifest !== null) {
+    if (readerMode === "spreads" && manifest !== null) {
       const groups = spreadGroups(manifest.pages);
       const index = spreadIndexForPage(groups, reader.currentPage);
       const target = groups[Math.min(groups.length - 1, index + 1)]?.[0];
@@ -192,6 +203,24 @@ export function Reader() {
       hideTimer.current = window.setTimeout(() => setControls(false), 2_600);
     }
   };
+
+  useEffect(() => {
+    const media = window.matchMedia?.("(max-width: 560px)");
+    const sync = () => setCompactPhone(media?.matches ?? window.innerWidth <= 560);
+    sync();
+    if (media === undefined) {
+      window.addEventListener("resize", sync);
+      return () => window.removeEventListener("resize", sync);
+    }
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (compactPhone && reader?.settings.mode === "spreads") {
+      void updateSettings({ mode: "singlePage" });
+    }
+  }, [compactPhone, reader?.settings.mode, updateSettings]);
 
   const showControls = () => {
     if (reader === null) return;
@@ -582,7 +611,7 @@ export function Reader() {
     <div
       className={[
         "reader-shell",
-        `mode-${reader.settings.mode}`,
+        `mode-${readerMode}`,
         reader.controlsVisible ? "controls-visible" : "controls-hidden",
         reader.settingsOpen ? "settings-visible" : "",
         reader.zoom > 1 ? "is-zoomed" : "",
@@ -655,7 +684,7 @@ export function Reader() {
         onSettings={() => setSettingsOpen(!reader.settingsOpen)}
         onMode={(mode) => {
           setGuidedStep(0);
-          if (mode === "presentation" && !fullscreen) {
+          if (mode === "presentation" && !fullscreen && !mobile) {
             void setReaderFullscreen(true)
               .then(() => {
                 setFullscreen(true);
@@ -669,6 +698,7 @@ export function Reader() {
                 ),
               );
           }
+          if (mode === "presentation" && mobile) setControls(false);
           void updateSettings({ mode });
         }}
         onFullscreen={() => {
@@ -688,7 +718,7 @@ export function Reader() {
       />
 
       <div className="reader-stage" ref={stageRef}>
-        {reader.settings.mode === "guided" ? (
+        {readerMode === "guided" ? (
           <GuidedCanvas
             currentPage={reader.currentPage}
             pageUrl={reader.pageUrls[reader.currentPage]}
@@ -699,10 +729,10 @@ export function Reader() {
             onPrevious={previous}
             onNext={next}
           />
-        ) : reader.settings.mode === "continuous" ||
-        reader.settings.mode === "webtoon" ? (
+        ) : readerMode === "continuous" ||
+        readerMode === "webtoon" ? (
           <ContinuousPages
-            mode={reader.settings.mode}
+            mode={readerMode}
             currentPage={reader.currentPage}
             pageUrls={reader.pageUrls}
             settings={reader.settings}
@@ -716,7 +746,7 @@ export function Reader() {
             currentPage={reader.currentPage}
             pages={manifest.pages}
             pageUrls={reader.pageUrls}
-            spread={reader.settings.mode === "spreads"}
+            spread={readerMode === "spreads"}
             isRtl={isRtl}
             settings={reader.settings}
             imageStyle={imageStyle}
@@ -729,8 +759,8 @@ export function Reader() {
       </div>
 
       {reader.settings.showPageNumber &&
-        reader.settings.mode !== "continuous" &&
-        reader.settings.mode !== "webtoon" && (
+        readerMode !== "continuous" &&
+        readerMode !== "webtoon" && (
           <div className="reader-page-number" aria-live="polite">
             {reader.currentPage + 1} / {pageCount}
           </div>
@@ -808,6 +838,8 @@ function ReaderToolbar({
   onMode: (mode: ReaderMode) => void;
   onFullscreen: () => void;
 }) {
+  const platform = useKomaStore((state) => state.bootstrap?.platform);
+  const mobile = platform === "ios" || platform === "android";
   const currentMode = MODES.find((mode) => mode.id === settings.mode) ?? MODES[0]!;
   const CurrentModeIcon = currentMode.icon;
   return (
@@ -849,16 +881,18 @@ function ReaderToolbar({
         <ChevronDown size={14} aria-hidden="true" />
       </label>
       <div className="reader-toolbar-actions">
-        <button
-          type="button"
-          className="reader-icon-button"
-          onClick={onFullscreen}
-          aria-label={tr("Fullscreen")}
-          aria-pressed={fullscreen}
-          title={`${tr("Fullscreen")} · F`}
-        >
-          <Maximize2 size={18} />
-        </button>
+        {!mobile && (
+          <button
+            type="button"
+            className="reader-icon-button"
+            onClick={onFullscreen}
+            aria-label={tr("Fullscreen")}
+            aria-pressed={fullscreen}
+            title={`${tr("Fullscreen")} · F`}
+          >
+            <Maximize2 size={18} />
+          </button>
+        )}
         <button
           type="button"
           className={settingsOpen ? "reader-icon-button is-active" : "reader-icon-button"}
