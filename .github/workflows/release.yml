@@ -4,82 +4,17 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Release tag, for example v0.1.0"
-        required: true
-        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: koma-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+  group: koma-release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  prepare:
-    name: Prepare draft release
-    runs-on: ubuntu-22.04
-    outputs:
-      release_id: ${{ steps.release.outputs.release_id }}
-      release_tag: ${{ steps.release.outputs.release_tag }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-
-      - name: Validate release metadata
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-          GITHUB_REF_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-        run: npm run release:check
-
-      - name: Create or reuse draft
-        id: release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-        shell: bash
-        run: |
-          release_json="$(
-            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-              jq -c --arg tag "$RELEASE_TAG" \
-                '.[] | select(.tag_name == $tag)' |
-              head -n 1
-          )"
-
-          if [ -n "$release_json" ]; then
-            is_draft="$(jq -r .draft <<< "$release_json")"
-            if [ "$is_draft" != "true" ]; then
-              echo "Release $RELEASE_TAG already exists and is not a draft." >&2
-              exit 1
-            fi
-          else
-            release_json="$(
-              gh api \
-                --method POST \
-                "repos/$GITHUB_REPOSITORY/releases" \
-                -f tag_name="$RELEASE_TAG" \
-                -f target_commitish="$GITHUB_SHA" \
-                -f name="Koma $RELEASE_TAG" \
-                -F draft=true \
-                -F generate_release_notes=true
-            )"
-          fi
-
-          release_id="$(jq -r .id <<< "$release_json")"
-          test -n "$release_id"
-          test "$release_id" != "null"
-          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-  desktop:
+  build:
     name: Build ${{ matrix.name }}
-    needs: prepare
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -101,6 +36,7 @@ jobs:
             os: macos-15
             target: x86_64-apple-darwin
             bundles: app,dmg
+
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -154,6 +90,11 @@ jobs:
 
       - run: npm ci
 
+      - name: Validate release metadata
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: npm run release:check
+
       - name: Prepare updater signing key
         shell: bash
         env:
@@ -165,8 +106,8 @@ jobs:
           chmod 600 "$key_file"
           echo "TAURI_SIGNING_PRIVATE_KEY=$key_file" >> "$GITHUB_ENV"
 
-      - name: Build installers and updater assets
-        uses: tauri-apps/tauri-action@v1
+      - name: Build and attach installers
+        uses: tauri-apps/tauri-action@action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           KOMA_ANILIST_CLIENT_ID: ${{ secrets.KOMA_ANILIST_CLIENT_ID }}
@@ -175,83 +116,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
-          releaseId: ${{ needs.prepare.outputs.release_id }}
-          tagName: ${{ needs.prepare.outputs.release_tag }}
+          tagName: ${{ github.ref_name }}
+          releaseName: "Koma ${{ github.ref_name }}"
+          releaseBody: "Native installers and updater metadata are attached below."
           releaseDraft: true
           prerelease: false
+          generateReleaseNotes: true
           retryAttempts: 2
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           uploadUpdaterSignatures: true
           uploadWorkflowArtifacts: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
-
-  verify:
-    name: Verify release assets
-    needs: [prepare, desktop]
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Check installers and updater manifest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          assets="$(gh api \
-            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
-            --paginate \
-            --jq '.[].name')"
-
-          require_asset() {
-            local description="$1"
-            local pattern="$2"
-            if [[ ! "$assets" =~ $pattern ]]; then
-              echo "Missing $description release asset." >&2
-              echo "$assets" >&2
-              exit 1
-            fi
-          }
-
-          require_asset "Windows NSIS installer" '-setup\.exe$'
-          require_asset "Windows MSI installer" '\.msi$'
-          require_asset "macOS Apple silicon DMG" '_(aarch64|arm64)\.dmg$'
-          require_asset "macOS Intel DMG" '_(x64|x86_64)\.dmg$'
-          require_asset "Linux AppImage" '\.AppImage$'
-          require_asset "Linux Debian package" '\.deb$'
-          require_asset "Linux RPM package" '\.rpm$'
-          require_asset "updater signatures" '\.sig$'
-          require_asset "Tauri updater manifest" '^latest\.json$'
-
-          mkdir -p "$RUNNER_TEMP/koma-release"
-          gh release download "$RELEASE_TAG" \
-            --pattern latest.json \
-            --dir "$RUNNER_TEMP/koma-release" \
-            --clobber
-
-          manifest="$RUNNER_TEMP/koma-release/latest.json"
-          version="${RELEASE_TAG#v}"
-
-          jq -e --arg version "$version" '.version == $version' "$manifest"
-          jq -e '
-            .platforms
-            | has("darwin-aarch64")
-              and has("darwin-x86_64")
-              and has("linux-x86_64")
-              and has("windows-x86_64")
-          ' "$manifest"
-          jq -e --arg tag "$RELEASE_TAG" '
-            all(
-              .platforms[];
-              (.signature | type == "string" and length > 0)
-              and
-              (.url
-                | type == "string"
-                  and contains("/releases/download/" + $tag + "/"))
-            )
-          ' "$manifest"
-
-          echo "Verified Koma $RELEASE_TAG release assets:"
-          echo "$assets"

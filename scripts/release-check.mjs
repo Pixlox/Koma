@@ -40,13 +40,16 @@ if (tauri.bundle?.createUpdaterArtifacts !== true) {
   errors.push("updater artifacts are disabled");
 }
 const requiredReleaseSettings = [
-  ["Tauri release action", "uses: tauri-apps/tauri-action@v1"],
+  ["Tauri release action", "uses: tauri-apps/tauri-action@action-v0.6.2"],
+  ["tag-based release creation", "tagName: ${{ github.ref_name }}"],
+  ["draft release creation", "releaseDraft: true"],
+  ["generated release notes", "generateReleaseNotes: true"],
   ["updater JSON upload", "uploadUpdaterJson: true"],
   ["updater signature upload", "uploadUpdaterSignatures: true"],
+  ["workflow artifact upload disabled", "uploadWorkflowArtifacts: false"],
   ["Windows installers", "bundles: nsis,msi"],
   ["macOS installers", "bundles: app,dmg"],
   ["Linux installers", "bundles: appimage,deb,rpm"],
-  ["release asset verification", "name: Verify release assets"],
 ];
 for (const [description, setting] of requiredReleaseSettings) {
   if (!releaseWorkflow.includes(setting)) {
