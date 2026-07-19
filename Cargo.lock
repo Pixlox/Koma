@@ -2749,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "koma"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "koma-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-trait",
