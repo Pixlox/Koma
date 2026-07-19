@@ -16,12 +16,12 @@ use crate::{
     error::{KomaError, Result},
     formats::{is_image_path, modified_at, open_publication},
     model::{
-        Bookmark, ImportReceipt, LibraryItem, PublicationFormat, PublicationManifest,
+        Bookmark, ChapterRange, ImportReceipt, LibraryItem, PublicationFormat, PublicationManifest,
         ReaderSettings, ReadingState,
     },
 };
 
-const LIBRARY_SCHEMA_VERSION: i64 = 3;
+const LIBRARY_SCHEMA_VERSION: i64 = 4;
 const ITEM_COLUMNS: &str = "
     p.id,
     p.path,
@@ -39,7 +39,9 @@ const ITEM_COLUMNS: &str = "
     p.is_favorite,
     p.cover_data_url,
     p.added_at,
-    p.last_opened_at
+    p.last_opened_at,
+    r.current_chapter,
+    COALESCE(r.total_reading_seconds, 0)
 ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,16 +203,18 @@ impl Library {
                 format_json = ?2,
                 fingerprint = ?3,
                 page_count = ?4,
-                cover_data_url = COALESCE(?5, cover_data_url),
-                modified_at = ?6,
+                chapters_json = ?5,
+                cover_data_url = COALESCE(?6, cover_data_url),
+                modified_at = ?7,
                 is_missing = 0
-            WHERE id = ?7
+            WHERE id = ?8
             ",
             params![
                 database_path,
                 to_json(&manifest.format)?,
                 manifest.fingerprint,
                 manifest.pages.len() as i64,
+                to_json(&manifest.chapters)?,
                 cover_data_url,
                 manifest.modified_at.map(|value| value.to_rfc3339()),
                 publication_id.to_string(),
@@ -431,8 +435,8 @@ impl Library {
             "
             INSERT INTO publications (
                 id, path, format_json, fingerprint, title, series, number, volume,
-                page_count, cover_data_url, added_at, modified_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                page_count, chapters_json, cover_data_url, added_at, modified_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(path) DO UPDATE SET
                 id = excluded.id,
                 format_json = excluded.format_json,
@@ -442,6 +446,7 @@ impl Library {
                 number = excluded.number,
                 volume = excluded.volume,
                 page_count = excluded.page_count,
+                chapters_json = excluded.chapters_json,
                 cover_data_url = COALESCE(excluded.cover_data_url, publications.cover_data_url),
                 modified_at = excluded.modified_at,
                 is_missing = 0
@@ -456,6 +461,7 @@ impl Library {
                 manifest.metadata.number,
                 manifest.metadata.volume,
                 manifest.pages.len() as i64,
+                to_json(&manifest.chapters)?,
                 cover_data_url,
                 now,
                 modified_at,
@@ -546,16 +552,22 @@ impl Library {
     ) -> Result<ReadingState> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
-        let (page_count, settings_json): (i64, String) = transaction
+        let (page_count, chapters_json, settings_json, total_reading_seconds): (
+            i64,
+            String,
+            String,
+            i64,
+        ) = transaction
             .query_row(
                 "
-                SELECT p.page_count, r.settings_json
+                SELECT p.page_count, p.chapters_json, r.settings_json,
+                       r.total_reading_seconds
                 FROM publications p
                 JOIN reading_state r ON r.publication_id = p.id
                 WHERE p.id = ?1
                 ",
                 params![publication_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?
             .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
@@ -571,17 +583,21 @@ impl Library {
             0.0
         };
         let completed = completed && page_count > 0;
+        let chapters: Vec<ChapterRange> = from_json(&chapters_json)?;
+        let current_chapter = chapter_at_page(&chapters, current_page);
         let updated_at = Utc::now();
         transaction.execute(
             "
             UPDATE reading_state
-            SET current_page = ?1, progress = ?2, completed = ?3, updated_at = ?4
-            WHERE publication_id = ?5
+            SET current_page = ?1, progress = ?2, completed = ?3,
+                current_chapter = ?4, updated_at = ?5
+            WHERE publication_id = ?6
             ",
             params![
                 current_page as i64,
                 progress,
                 completed,
+                current_chapter,
                 updated_at.to_rfc3339(),
                 publication_id.to_string(),
             ],
@@ -592,6 +608,8 @@ impl Library {
             current_page,
             progress,
             completed,
+            current_chapter,
+            total_reading_seconds: u64::try_from(total_reading_seconds.max(0)).unwrap_or(0),
             settings: from_json(&settings_json)?,
             updated_at,
         })
@@ -685,11 +703,11 @@ impl Library {
     ) -> Result<ReadingState> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
-        let page_count: i64 = transaction
+        let (page_count, chapters_json): (i64, String) = transaction
             .query_row(
-                "SELECT page_count FROM publications WHERE id = ?1",
+                "SELECT page_count, chapters_json FROM publications WHERE id = ?1",
                 params![publication_id.to_string()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
@@ -701,28 +719,41 @@ impl Library {
             bounded_page as f64 / (page_count - 1) as f64
         };
         let completed = page_count > 0 && bounded_page + 1 >= page_count;
+        let chapters: Vec<ChapterRange> = from_json(&chapters_json)?;
+        let current_chapter = chapter_at_page(&chapters, bounded_page);
         let now = Utc::now();
+        let stored_state: Option<(String, i64)> = transaction
+            .query_row(
+                "
+                SELECT settings_json, total_reading_seconds
+                FROM reading_state WHERE publication_id = ?1
+                ",
+                params![publication_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let total_reading_seconds = stored_state
+            .as_ref()
+            .map(|(_, seconds)| u64::try_from((*seconds).max(0)).unwrap_or(0))
+            .unwrap_or(0);
         let settings_json = match settings {
             Some(settings) => to_json(settings)?,
-            None => transaction
-                .query_row(
-                    "SELECT settings_json FROM reading_state WHERE publication_id = ?1",
-                    params![publication_id.to_string()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
+            None => stored_state
+                .map(|(settings, _)| settings)
                 .unwrap_or(to_json(&ReaderSettings::default())?),
         };
         transaction.execute(
             "
             INSERT INTO reading_state (
-                publication_id, current_page, progress, completed, settings_json, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                publication_id, current_page, progress, completed, settings_json,
+                updated_at, current_chapter
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(publication_id) DO UPDATE SET
                 current_page = excluded.current_page,
                 progress = excluded.progress,
                 completed = excluded.completed,
                 settings_json = excluded.settings_json,
+                current_chapter = excluded.current_chapter,
                 updated_at = excluded.updated_at
             ",
             params![
@@ -732,6 +763,7 @@ impl Library {
                 completed,
                 settings_json,
                 now.to_rfc3339(),
+                current_chapter,
             ],
         )?;
         transaction.execute(
@@ -744,6 +776,8 @@ impl Library {
             current_page: bounded_page,
             progress,
             completed,
+            current_chapter,
+            total_reading_seconds,
             settings: from_json(&settings_json)?,
             updated_at: now,
         })
@@ -754,7 +788,8 @@ impl Library {
         let row = connection
             .query_row(
                 "
-                SELECT current_page, progress, completed, settings_json, updated_at
+                SELECT current_page, progress, completed, settings_json, updated_at,
+                       current_chapter, total_reading_seconds
                 FROM reading_state WHERE publication_id = ?1
                 ",
                 params![publication_id.to_string()],
@@ -765,23 +800,95 @@ impl Library {
                         row.get::<_, bool>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, Option<f64>>(5)?,
+                        row.get::<_, i64>(6)?,
                     ))
                 },
             )
             .optional()?;
         row.map(
-            |(current_page, progress, completed, settings, updated_at)| {
+            |(
+                current_page,
+                progress,
+                completed,
+                settings,
+                updated_at,
+                current_chapter,
+                total_reading_seconds,
+            )| {
                 Ok(ReadingState {
                     publication_id,
                     current_page: usize::try_from(current_page.max(0)).unwrap_or(0),
                     progress,
                     completed,
+                    current_chapter,
+                    total_reading_seconds: u64::try_from(total_reading_seconds.max(0)).unwrap_or(0),
                     settings: from_json(&settings)?,
                     updated_at: parse_datetime(&updated_at)?,
                 })
             },
         )
         .transpose()
+    }
+
+    pub fn record_reading_time(&self, publication_id: Uuid, elapsed_seconds: u64) -> Result<u64> {
+        let elapsed_seconds = elapsed_seconds.min(120);
+        let connection = self.lock()?;
+        if elapsed_seconds > 0 {
+            let updated = connection.execute(
+                "
+                UPDATE reading_state
+                SET total_reading_seconds = total_reading_seconds + ?1,
+                    updated_at = ?2
+                WHERE publication_id = ?3
+                ",
+                params![
+                    elapsed_seconds as i64,
+                    Utc::now().to_rfc3339(),
+                    publication_id.to_string(),
+                ],
+            )?;
+            if updated == 0 {
+                return Err(KomaError::Other(
+                    "publication is not in the library".to_owned(),
+                ));
+            }
+        }
+        let seconds: i64 = connection
+            .query_row(
+                "SELECT total_reading_seconds FROM reading_state WHERE publication_id = ?1",
+                params![publication_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+        Ok(u64::try_from(seconds.max(0)).unwrap_or(0))
+    }
+
+    pub fn completed_chapter(
+        &self,
+        publication_id: Uuid,
+        current_page: usize,
+    ) -> Result<Option<u32>> {
+        let connection = self.lock()?;
+        let chapters_json: String = connection
+            .query_row(
+                "SELECT chapters_json FROM publications WHERE id = ?1",
+                params![publication_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+        let chapters: Vec<ChapterRange> = from_json(&chapters_json)?;
+        Ok(chapters
+            .iter()
+            .filter(|chapter| {
+                chapter.number.is_finite()
+                    && chapter.number >= 1.0
+                    && chapter.end_page_index <= current_page
+            })
+            .map(|chapter| chapter.number.floor() as u32)
+            .max())
     }
 
     pub fn add_bookmark(
@@ -1033,13 +1140,16 @@ impl Library {
             transaction.execute(
                 "
                 INSERT INTO reading_state (
-                    publication_id, current_page, progress, completed, settings_json, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    publication_id, current_page, progress, completed, settings_json,
+                    updated_at, current_chapter, total_reading_seconds
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                 ON CONFLICT(publication_id) DO UPDATE SET
                     current_page = excluded.current_page,
                     progress = excluded.progress,
                     completed = excluded.completed,
                     settings_json = excluded.settings_json,
+                    current_chapter = excluded.current_chapter,
+                    total_reading_seconds = excluded.total_reading_seconds,
                     updated_at = excluded.updated_at
                 ",
                 params![
@@ -1049,6 +1159,8 @@ impl Library {
                     state.completed && page_count > 0,
                     to_json(&state.settings)?,
                     state.updated_at.to_rfc3339(),
+                    state.current_chapter,
+                    state.total_reading_seconds as i64,
                 ],
             )?;
             report.reading_states += 1;
@@ -1229,6 +1341,7 @@ fn migrate(connection: &Connection) -> Result<()> {
             number TEXT,
             volume INTEGER,
             page_count INTEGER NOT NULL CHECK (page_count >= 0),
+            chapters_json TEXT NOT NULL DEFAULT '[]',
             cover_data_url TEXT,
             added_at TEXT NOT NULL,
             modified_at TEXT,
@@ -1243,6 +1356,9 @@ fn migrate(connection: &Connection) -> Result<()> {
             current_page INTEGER NOT NULL DEFAULT 0 CHECK (current_page >= 0),
             progress REAL NOT NULL DEFAULT 0.0 CHECK (progress >= 0.0 AND progress <= 1.0),
             completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+            current_chapter REAL,
+            total_reading_seconds INTEGER NOT NULL DEFAULT 0
+                CHECK (total_reading_seconds >= 0),
             settings_json TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (publication_id) REFERENCES publications(id)
@@ -1297,7 +1413,40 @@ fn migrate(connection: &Connection) -> Result<()> {
         );
         ",
     )?;
+    add_column_if_missing(
+        connection,
+        "publications",
+        "chapters_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column_if_missing(connection, "reading_state", "current_chapter", "REAL")?;
+    add_column_if_missing(
+        connection,
+        "reading_state",
+        "total_reading_seconds",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     connection.pragma_update(None, "user_version", LIBRARY_SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    connection.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )?;
     Ok(())
 }
 
@@ -1393,7 +1542,9 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> Result<LibraryItem> {
         volume: row.get(6)?,
         page_count,
         current_page: current_page.min(page_count.saturating_sub(1)),
+        current_chapter: row.get(17)?,
         progress: row.get::<_, f64>(9)?.clamp(0.0, 1.0),
+        total_reading_seconds: u64::try_from(row.get::<_, i64>(18)?.max(0)).unwrap_or(0),
         is_completed: row.get(10)?,
         is_hidden: row.get(11)?,
         is_missing: row.get(12)?,
@@ -1405,6 +1556,15 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> Result<LibraryItem> {
             .map(|value| parse_datetime(&value))
             .transpose()?,
     })
+}
+
+fn chapter_at_page(chapters: &[ChapterRange], page_index: usize) -> Option<f64> {
+    chapters
+        .iter()
+        .find(|chapter| {
+            page_index >= chapter.start_page_index && page_index <= chapter.end_page_index
+        })
+        .map(|chapter| chapter.number)
 }
 
 fn thumbnail_data_url(bytes: &[u8]) -> Result<String> {
@@ -1485,7 +1645,7 @@ mod tests {
     use crate::{
         formats::ZipPublication,
         metadata::ComicInfo,
-        model::{PublicationFormat, ReadingDirection},
+        model::{ChapterRange, KomaArchiveMetadata, PublicationFormat, ReadingDirection},
     };
 
     fn tiny_png() -> Vec<u8> {
@@ -1547,6 +1707,64 @@ mod tests {
                 .expect("state exists");
             assert_eq!(state.settings.direction, ReadingDirection::Automatic);
         }
+    }
+
+    #[test]
+    fn persists_chapter_progress_and_active_reading_time() {
+        let directory = tempdir().expect("temp directory");
+        let first = directory.path().join("001.png");
+        let second = directory.path().join("002.png");
+        std::fs::write(&first, tiny_png()).expect("first page");
+        std::fs::write(&second, tiny_png()).expect("second page");
+        let archive = directory.path().join("series.cbz");
+        ZipPublication::write_cbz_from_files_with_metadata(
+            &archive,
+            [
+                ("001.png".to_owned(), first),
+                ("002.png".to_owned(), second),
+            ],
+            &ComicInfo::default(),
+            Some(&KomaArchiveMetadata::new(vec![
+                ChapterRange {
+                    id: Some("10".to_owned()),
+                    number: 0.5,
+                    title: Some("Prologue".to_owned()),
+                    start_page_index: 0,
+                    end_page_index: 0,
+                },
+                ChapterRange {
+                    id: Some("11".to_owned()),
+                    number: 1.0,
+                    title: None,
+                    start_page_index: 1,
+                    end_page_index: 1,
+                },
+            ])),
+        )
+        .expect("write archive");
+
+        let library = Library::in_memory().expect("library");
+        let item = library.import_path(&archive, None).expect("import");
+        let first_state = library.save_progress(item.id, 0, None).expect("progress");
+        assert_eq!(first_state.current_chapter, Some(0.5));
+        assert_eq!(
+            library.completed_chapter(item.id, 0).expect("completed"),
+            None
+        );
+        let second_state = library.save_progress(item.id, 1, None).expect("progress");
+        assert_eq!(second_state.current_chapter, Some(1.0));
+        assert_eq!(
+            library.completed_chapter(item.id, 1).expect("completed"),
+            Some(1)
+        );
+        assert_eq!(
+            library
+                .record_reading_time(item.id, 300)
+                .expect("record time"),
+            120
+        );
+        let stored = library.get(item.id).expect("get").expect("item");
+        assert_eq!(stored.total_reading_seconds, 120);
     }
 
     #[test]

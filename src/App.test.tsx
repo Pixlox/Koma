@@ -64,6 +64,12 @@ describe("Koma application workflows", () => {
       await screen.findByRole("heading", { name: "Settings", level: 2 }),
     ).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Language" })).toBeInTheDocument();
+    const connectButtons = screen.getAllByRole("button", { name: "Connect" });
+    expect(connectButtons).toHaveLength(2);
+    await userEvent.click(connectButtons[0]!);
+    expect(
+      await screen.findByText("Connected as KomaReader"),
+    ).toBeInTheDocument();
   });
 
   it("opens the reader, navigates by keyboard, and saves a page note", async () => {

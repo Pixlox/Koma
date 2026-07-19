@@ -26,10 +26,13 @@ tauri-build = { version = "2", features = [] }
 base64.workspace = true
 chrono.workspace = true
 koma-core = { path = "../crates/koma-core" }
+keyring = "4.1"
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 tokio.workspace = true
 url.workspace = true
@@ -38,7 +41,7 @@ uuid.workspace = true
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 discord-rich-presence = "1.1"
 tauri-plugin-process = "2"
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "ios")'.dependencies]

@@ -132,6 +132,10 @@ jobs:
 
       - run: npm ci
       - name: Build native bundles
+        env:
+          KOMA_ANILIST_CLIENT_ID: ${{ secrets.KOMA_ANILIST_CLIENT_ID }}
+          KOMA_MAL_CLIENT_ID: ${{ secrets.KOMA_MAL_CLIENT_ID }}
+          KOMA_MAL_CLIENT_SECRET: ${{ secrets.KOMA_MAL_CLIENT_SECRET }}
         run: npm run tauri build -- --config src-tauri/tauri.ci.conf.json --ci --no-sign --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       - uses: actions/upload-artifact@v4

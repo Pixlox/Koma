@@ -163,7 +163,9 @@ function seededItems(): LibraryItem[] {
       volume: index === 1 ? 2 : null,
       pageCount: seed.pages,
       currentPage: seed.current,
+      currentChapter: null,
       progress,
+      totalReadingSeconds: seed.current * 35,
       isCompleted: progress >= 1,
       isHidden: false,
       isMissing: false,
@@ -274,8 +276,10 @@ export function demoOpenPayload(item: LibraryItem): ReaderOpenPayload {
   const readingState: ReadingState = {
     publicationId: item.id,
     currentPage: item.currentPage,
+    currentChapter: item.currentChapter,
     progress: item.progress,
     completed: item.isCompleted,
+    totalReadingSeconds: item.totalReadingSeconds,
     settings,
     updatedAt: item.lastOpenedAt ?? item.addedAt,
   };
@@ -300,6 +304,7 @@ export function demoOpenPayload(item: LibraryItem): ReaderOpenPayload {
       direction: settings.direction,
     },
     pages: descriptors(item.pageCount),
+    chapters: [],
     fingerprint: `demo-${item.id}`,
     modifiedAt: item.addedAt,
   };

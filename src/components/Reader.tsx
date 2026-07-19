@@ -34,6 +34,7 @@ import {
 } from "react";
 
 import { tr } from "../i18n";
+import { backend } from "../lib/backend";
 import { useKomaStore } from "../store/koma";
 import type {
   Bookmark as BookmarkRecord,
@@ -151,6 +152,13 @@ export function Reader() {
   const pageCount = manifest?.pages.length ?? 0;
   const readerId = reader?.payload.libraryId;
   const currentPage = reader?.currentPage;
+  const currentChapter =
+    manifest?.chapters.find(
+      (chapter) =>
+        currentPage !== undefined &&
+        currentPage >= chapter.startPageIndex &&
+        currentPage <= chapter.endPageIndex,
+    ) ?? null;
   const readerMode =
     compactPhone && reader?.settings.mode === "spreads"
       ? "singlePage"
@@ -215,6 +223,43 @@ export function Reader() {
     media.addEventListener("change", sync);
     return () => media.removeEventListener("change", sync);
   }, []);
+
+  useEffect(() => {
+    if (readerId === undefined) return;
+    let lastActivityAt = Date.now();
+    let lastRecordedAt = Date.now();
+    const markActive = () => {
+      lastActivityAt = Date.now();
+    };
+    const flush = () => {
+      const now = Date.now();
+      if (
+        document.visibilityState !== "visible" ||
+        now - lastActivityAt > 120_000
+      ) {
+        lastRecordedAt = now;
+        return;
+      }
+      const elapsedSeconds = Math.floor((now - lastRecordedAt) / 1000);
+      lastRecordedAt = now;
+      if (elapsedSeconds > 0) {
+        void backend.recordReadingTime(readerId, elapsedSeconds);
+      }
+    };
+    const interval = window.setInterval(flush, 15_000);
+    window.addEventListener("pointerdown", markActive, { passive: true });
+    window.addEventListener("keydown", markActive);
+    window.addEventListener("wheel", markActive, { passive: true });
+    document.addEventListener("visibilitychange", flush);
+    return () => {
+      window.clearInterval(interval);
+      flush();
+      window.removeEventListener("pointerdown", markActive);
+      window.removeEventListener("keydown", markActive);
+      window.removeEventListener("wheel", markActive);
+      document.removeEventListener("visibilitychange", flush);
+    };
+  }, [readerId]);
 
   useEffect(() => {
     if (compactPhone && reader?.settings.mode === "spreads") {
@@ -762,6 +807,8 @@ export function Reader() {
         readerMode !== "continuous" &&
         readerMode !== "webtoon" && (
           <div className="reader-page-number" aria-live="polite">
+            {currentChapter !== null &&
+              `${tr("Chapter {{number}}", { number: currentChapter.number })} · `}
             {reader.currentPage + 1} / {pageCount}
           </div>
         )}
@@ -850,7 +897,7 @@ function ReaderToolbar({
       data-fullscreen={fullscreen}
       data-tauri-drag-region
     >
-      <div className="reader-toolbar-leading">
+      <div className="reader-toolbar-leading" data-tauri-drag-region>
         <button
           type="button"
           className="reader-icon-button"
@@ -859,9 +906,11 @@ function ReaderToolbar({
         >
           <ChevronLeft size={21} />
         </button>
-        <div className="reader-title">
-          <strong>{title}</strong>
-          {series !== null && series !== title && <span>{series}</span>}
+        <div className="reader-title" data-tauri-drag-region>
+          <strong data-tauri-drag-region>{title}</strong>
+          {series !== null && series !== title && (
+            <span data-tauri-drag-region>{series}</span>
+          )}
         </div>
       </div>
       <label className="reader-mode-button">

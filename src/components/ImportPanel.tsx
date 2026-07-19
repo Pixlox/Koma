@@ -53,6 +53,9 @@ export function ImportPanel() {
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [selectedVolume, setSelectedVolume] = useState<number | null>(null);
   const [selectedChapter, setSelectedChapter] = useState<number | null>(null);
+  const [selectedSeriesChapters, setSelectedSeriesChapters] = useState<
+    Set<number>
+  >(new Set());
   const [scope, setScope] = useState<"chapter" | "volume" | "series">("volume");
   const [destination, setDestination] = useState(
     bootstrap?.defaultImportDirectory ?? "~/Downloads/Koma",
@@ -137,12 +140,22 @@ export function ImportPanel() {
     if (progress.total <= 0) return 0;
     return Math.round((progress.completed / progress.total) * 100);
   }, [progress]);
+  const seriesChapters = useMemo(() => {
+    if (preview === null) return [];
+    const language =
+      preview.volumes.find((volume) => volume.id === selectedVolume)?.language ??
+      preview.chapters.find((chapter) => chapter.id === selectedChapter)?.language;
+    return language === undefined
+      ? preview.chapters
+      : preview.chapters.filter((chapter) => chapter.language === language);
+  }, [preview, selectedChapter, selectedVolume]);
 
   const resetPreview = (value: string) => {
     setSource(value);
     setPreview(null);
     setSelectedVolume(null);
     setSelectedChapter(null);
+    setSelectedSeriesChapters(new Set());
     setScope("volume");
     setConfirmed(false);
     setPhase("idle");
@@ -166,6 +179,21 @@ export function ImportPanel() {
       setPreview(result);
       setSelectedVolume(result.selectedVolumeId);
       setSelectedChapter(result.selectedChapterId);
+      const selectedLanguage =
+        result.volumes.find((volume) => volume.id === result.selectedVolumeId)
+          ?.language ??
+        result.chapters.find(
+          (chapter) => chapter.id === result.selectedChapterId,
+        )?.language;
+      const chapters =
+        selectedLanguage === undefined
+          ? result.chapters
+          : result.chapters.filter(
+              (chapter) => chapter.language === selectedLanguage,
+            );
+      setSelectedSeriesChapters(
+        new Set(chapters.map((chapter) => chapter.id)),
+      );
       setScope(
         result.availableScopes.includes("volume") ? "volume" : "series",
       );
@@ -220,6 +248,8 @@ export function ImportPanel() {
       destinationDirectory: destination,
       volumeId: selectedVolume,
       chapterId: selectedChapter,
+      selectedChapterIds:
+        scope === "series" ? [...selectedSeriesChapters] : [],
       scope,
       preferredLanguage:
         (scope === "chapter"
@@ -430,21 +460,74 @@ export function ImportPanel() {
               </div>
 
               {scope === "series" && (
-                <div className="series-import-summary">
-                  <strong>{tr("Earliest to latest")}</strong>
-                  <span>
-                    {tr("{{count}} chapters", {
-                      count: preview.seriesChapterCount ?? 0,
-                    })}
-                  </span>
-                  <small>
-                    {preview.seriesPageCount === null
-                      ? tr("Page count checked before download")
-                      : tr("{{count}} pages", {
-                          count: preview.seriesPageCount,
+                <>
+                  <div className="series-import-summary">
+                    <strong>{tr("Earliest to latest")}</strong>
+                    <span>
+                      {tr("{{count}} chapters", {
+                        count: preview.seriesChapterCount ?? preview.chapters.length,
+                      })}
+                    </span>
+                    <small>
+                      {preview.seriesPageCount === null
+                        ? tr("Page count checked before download")
+                        : tr("{{count}} pages", {
+                            count: preview.seriesPageCount,
+                          })}
+                    </small>
+                  </div>
+                  <fieldset className="series-chapter-picker">
+                    <div className="series-chapter-heading">
+                      <legend>
+                        {tr("{{count}} chapters selected", {
+                          count: selectedSeriesChapters.size,
                         })}
-                  </small>
-                </div>
+                      </legend>
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => {
+                          setSelectedSeriesChapters(
+                            selectedSeriesChapters.size === seriesChapters.length
+                              ? new Set()
+                              : new Set(seriesChapters.map((chapter) => chapter.id)),
+                          );
+                        }}
+                      >
+                        {selectedSeriesChapters.size === seriesChapters.length
+                          ? tr("Deselect all")
+                          : tr("Select all")}
+                      </button>
+                    </div>
+                    <div className="series-chapter-list">
+                      {seriesChapters.map((chapter) => (
+                        <label key={chapter.id}>
+                          <input
+                            type="checkbox"
+                            checked={selectedSeriesChapters.has(chapter.id)}
+                            onChange={() =>
+                              setSelectedSeriesChapters((current) => {
+                                const next = new Set(current);
+                                if (next.has(chapter.id)) next.delete(chapter.id);
+                                else next.add(chapter.id);
+                                return next;
+                              })
+                            }
+                            disabled={
+                              phase === "downloading" || phase === "packaging"
+                            }
+                          />
+                          <span>
+                            {tr("Chapter {{number}}", {
+                              number: chapter.number,
+                            })}
+                            {chapter.name === null ? "" : ` · ${chapter.name}`}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                </>
               )}
 
               {scope === "chapter" && (
@@ -596,6 +679,7 @@ export function ImportPanel() {
                     !confirmed ||
                     (scope === "volume" && selectedVolume === null) ||
                     (scope === "chapter" && selectedChapter === null) ||
+                    (scope === "series" && selectedSeriesChapters.size === 0) ||
                     phase === "downloading" ||
                     phase === "packaging" ||
                     phase === "checking"

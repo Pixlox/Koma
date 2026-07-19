@@ -79,6 +79,7 @@ impl PdfPublication {
                 format: PublicationFormat::Pdf,
                 metadata,
                 pages: descriptors,
+                chapters: Vec::new(),
                 fingerprint,
                 modified_at: modified_at(path),
             },

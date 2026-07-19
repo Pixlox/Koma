@@ -185,8 +185,37 @@ pub struct PublicationManifest {
     pub format: PublicationFormat,
     pub metadata: PublicationMetadata,
     pub pages: Vec<PageDescriptor>,
+    #[serde(default)]
+    pub chapters: Vec<ChapterRange>,
     pub fingerprint: String,
     pub modified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterRange {
+    pub id: Option<String>,
+    pub number: f64,
+    pub title: Option<String>,
+    pub start_page_index: usize,
+    pub end_page_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KomaArchiveMetadata {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub chapters: Vec<ChapterRange>,
+}
+
+impl KomaArchiveMetadata {
+    pub fn new(chapters: Vec<ChapterRange>) -> Self {
+        Self {
+            schema_version: 1,
+            chapters,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,7 +238,11 @@ pub struct LibraryItem {
     pub volume: Option<i32>,
     pub page_count: usize,
     pub current_page: usize,
+    #[serde(default)]
+    pub current_chapter: Option<f64>,
     pub progress: f64,
+    #[serde(default)]
+    pub total_reading_seconds: u64,
     pub is_completed: bool,
     pub is_hidden: bool,
     pub is_missing: bool,
@@ -224,8 +257,12 @@ pub struct LibraryItem {
 pub struct ReadingState {
     pub publication_id: Uuid,
     pub current_page: usize,
+    #[serde(default)]
+    pub current_chapter: Option<f64>,
     pub progress: f64,
     pub completed: bool,
+    #[serde(default)]
+    pub total_reading_seconds: u64,
     pub settings: ReaderSettings,
     pub updated_at: DateTime<Utc>,
 }

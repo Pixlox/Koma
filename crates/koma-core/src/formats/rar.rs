@@ -72,6 +72,7 @@ impl RarPublication {
             format: PublicationFormat::Cbr,
             metadata: PublicationMetadata::inferred_from_path(path),
             pages: descriptors,
+            chapters: Vec::new(),
             fingerprint,
             modified_at: modified_at(path),
         };

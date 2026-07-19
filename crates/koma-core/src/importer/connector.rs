@@ -35,7 +35,7 @@ use crate::{
     error::{KomaError, Result},
     formats::{MAX_PAGES, ZipPublication, validate_page_bytes},
     metadata::ComicInfo,
-    model::ImportReceipt,
+    model::{ChapterRange, ImportReceipt, KomaArchiveMetadata},
 };
 
 const CONNECTOR_SCHEMA_VERSION_V1: u32 = 1;
@@ -671,7 +671,9 @@ impl LinkImporter for DeclarativeImporter {
         std::fs::create_dir(&staging_pages)?;
         let width = total.to_string().len().max(4);
         let mut specifications = Vec::with_capacity(total);
+        let mut chapter_ranges = Vec::with_capacity(chapters.len());
         for chapter in chapters {
+            let start_page_index = specifications.len();
             let page_width = chapter.pages.len().to_string().len().max(3);
             for (page_index, page) in chapter.pages.into_iter().enumerate() {
                 let index = specifications.len();
@@ -685,6 +687,13 @@ impl LinkImporter for DeclarativeImporter {
                     ),
                 ));
             }
+            chapter_ranges.push(ChapterRange {
+                id: None,
+                number: chapter.number,
+                title: None,
+                start_page_index,
+                end_page_index: specifications.len() - 1,
+            });
         }
         let concurrency = options.download_concurrency.clamp(1, 8);
         let completed = Arc::new(AtomicUsize::new(0));
@@ -759,7 +768,12 @@ impl LinkImporter for DeclarativeImporter {
         };
         let package_path = output_path.clone();
         tokio::task::spawn_blocking(move || {
-            ZipPublication::write_cbz_from_files(&package_path, downloaded, &comic_info)
+            ZipPublication::write_cbz_from_files_with_metadata(
+                &package_path,
+                downloaded,
+                &comic_info,
+                Some(&KomaArchiveMetadata::new(chapter_ranges)),
+            )
         })
         .await
         .map_err(|error| KomaError::Other(format!("CBZ packaging task failed: {error}")))??;
@@ -866,7 +880,35 @@ impl MappedFeed {
 
     fn selected_chapters(&self, options: &ImportOptions) -> Result<Vec<MappedChapter>> {
         match options.scope {
-            ImportScope::Series => return Ok(self.chapters.clone()),
+            ImportScope::Series => {
+                if options.selected_chapter_ids.is_empty() {
+                    return Ok(self.chapters.clone());
+                }
+                let selected = options
+                    .selected_chapter_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>();
+                let chapters = self
+                    .chapters
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| selected.contains(&(*index as u64 + 1)))
+                    .map(|(_, chapter)| chapter.clone())
+                    .collect::<Vec<_>>();
+                if chapters.len() != selected.len() {
+                    return Err(KomaError::ImportDenied(
+                        "one or more selected chapters are not exposed by this connector"
+                            .to_owned(),
+                    ));
+                }
+                if chapters.is_empty() {
+                    return Err(KomaError::ImportDenied(
+                        "select at least one chapter to import".to_owned(),
+                    ));
+                }
+                return Ok(chapters);
+            }
             ImportScope::Chapter => {
                 let index = options
                     .chapter_id

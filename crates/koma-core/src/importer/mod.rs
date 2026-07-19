@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering as CmpOrdering,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Read,
     net::IpAddr,
     path::{Path, PathBuf},
@@ -28,7 +28,7 @@ use crate::{
     error::{KomaError, Result},
     formats::{MAX_PAGES, ZipPublication, validate_page_bytes},
     metadata::ComicInfo,
-    model::ImportReceipt,
+    model::{ChapterRange, ImportReceipt, KomaArchiveMetadata},
 };
 
 mod connector;
@@ -55,6 +55,8 @@ pub struct ImportOptions {
     #[serde(default)]
     pub chapter_id: Option<u64>,
     #[serde(default)]
+    pub selected_chapter_ids: Vec<u64>,
+    #[serde(default)]
     pub scope: ImportScope,
     pub preferred_language: Option<String>,
     pub overwrite_existing: bool,
@@ -67,6 +69,7 @@ impl ImportOptions {
             destination_directory: destination_directory.into(),
             volume_id: None,
             chapter_id: None,
+            selected_chapter_ids: Vec::new(),
             scope: ImportScope::Volume,
             preferred_language: Some("en".to_owned()),
             overwrite_existing: false,
@@ -674,6 +677,7 @@ impl MangaFireImporter {
         }
         Ok(ResolvedChapter {
             number: summary.number,
+            name: summary.name,
             chapter,
         })
     }
@@ -703,7 +707,11 @@ impl MangaFireImporter {
             })?;
         let chapter_name = clean_string(&summary.name);
         let chapter = self
-            .load_official_chapter(&resolved.target.hid, &resolved.volume.language, summary)
+            .load_official_chapter(
+                &resolved.target.hid,
+                &resolved.volume.language,
+                summary.clone(),
+            )
             .await?;
         let total = chapter.chapter.pages.len();
         if total == 0 || total > MAX_PAGES {
@@ -795,9 +803,21 @@ impl MangaFireImporter {
             },
         );
         let comic_info = chapter_comic_info(&resolved, chapter.number, chapter_name, total);
+        let koma_metadata = KomaArchiveMetadata::new(vec![ChapterRange {
+            id: Some(selected_id.to_string()),
+            number: chapter.number,
+            title: clean_string(&summary.name),
+            start_page_index: 0,
+            end_page_index: total - 1,
+        }]);
         let package_path = output_path.clone();
         tokio::task::spawn_blocking(move || {
-            ZipPublication::write_cbz_from_files(&package_path, downloaded, &comic_info)
+            ZipPublication::write_cbz_from_files_with_metadata(
+                &package_path,
+                downloaded,
+                &comic_info,
+                Some(&koma_metadata),
+            )
         })
         .await
         .map_err(|error| KomaError::Other(format!("CBZ packaging task failed: {error}")))??;
@@ -833,9 +853,27 @@ impl MangaFireImporter {
         options: &ImportOptions,
         events: Option<&UnboundedSender<ImportEvent>>,
     ) -> Result<ImportReceipt> {
-        let summaries = self
+        let mut summaries = self
             .official_chapter_summaries(&resolved.target.hid, &resolved.volume.language)
             .await?;
+        if !options.selected_chapter_ids.is_empty() {
+            let selected = options
+                .selected_chapter_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            summaries.retain(|chapter| selected.contains(&chapter.id));
+            if summaries.len() != selected.len() {
+                return Err(KomaError::ImportDenied(
+                    "one or more selected chapters do not belong to this series".to_owned(),
+                ));
+            }
+        }
+        if summaries.is_empty() {
+            return Err(KomaError::ImportDenied(
+                "select at least one chapter to import".to_owned(),
+            ));
+        }
         let chapters = self
             .load_official_chapters(&resolved.target.hid, &resolved.volume.language, summaries)
             .await?;
@@ -868,7 +906,9 @@ impl MangaFireImporter {
         )?;
         let global_width = total.to_string().len().max(4);
         let mut specifications = Vec::with_capacity(total);
+        let mut chapter_ranges = Vec::with_capacity(chapters.len());
         for chapter in &chapters {
+            let start_page_index = specifications.len();
             let page_width = chapter.chapter.pages.len().to_string().len().max(3);
             for (page_index, page) in chapter.chapter.pages.iter().cloned().enumerate() {
                 let global_index = specifications.len();
@@ -882,6 +922,13 @@ impl MangaFireImporter {
                     ),
                 ));
             }
+            chapter_ranges.push(ChapterRange {
+                id: Some(chapter.chapter.id.to_string()),
+                number: chapter.number,
+                title: clean_string(&chapter.name),
+                start_page_index,
+                end_page_index: specifications.len() - 1,
+            });
         }
 
         let concurrency = options.download_concurrency.clamp(1, 8);
@@ -949,9 +996,15 @@ impl MangaFireImporter {
             },
         );
         let comic_info = series_comic_info(&resolved, total);
+        let koma_metadata = KomaArchiveMetadata::new(chapter_ranges);
         let package_path = output_path.clone();
         tokio::task::spawn_blocking(move || {
-            ZipPublication::write_cbz_from_files(&package_path, downloaded, &comic_info)
+            ZipPublication::write_cbz_from_files_with_metadata(
+                &package_path,
+                downloaded,
+                &comic_info,
+                Some(&koma_metadata),
+            )
         })
         .await
         .map_err(|error| KomaError::Other(format!("CBZ packaging task failed: {error}")))??;
@@ -1408,6 +1461,7 @@ struct ResolvedImport {
 #[derive(Debug)]
 struct ResolvedChapter {
     number: f64,
+    name: String,
     chapter: MangaFireChapter,
 }
 

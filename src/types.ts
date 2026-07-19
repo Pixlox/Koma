@@ -53,7 +53,9 @@ export interface LibraryItem {
   volume: number | null;
   pageCount: number;
   currentPage: number;
+  currentChapter: number | null;
   progress: number;
+  totalReadingSeconds: number;
   isCompleted: boolean;
   isHidden: boolean;
   isMissing: boolean;
@@ -96,15 +98,26 @@ export interface PublicationManifest {
   format: PublicationFormat;
   metadata: PublicationMetadata;
   pages: PageDescriptor[];
+  chapters: ChapterRange[];
   fingerprint: string;
   modifiedAt: string | null;
+}
+
+export interface ChapterRange {
+  id: string | null;
+  number: number;
+  title: string | null;
+  startPageIndex: number;
+  endPageIndex: number;
 }
 
 export interface ReadingState {
   publicationId: string;
   currentPage: number;
+  currentChapter: number | null;
   progress: number;
   completed: boolean;
+  totalReadingSeconds: number;
   settings: ReaderSettings;
   updatedAt: string;
 }
@@ -269,10 +282,57 @@ export interface ImportOptions {
   destinationDirectory: string;
   volumeId: number | null;
   chapterId: number | null;
+  selectedChapterIds: number[];
   scope: "chapter" | "volume" | "series";
   preferredLanguage: string | null;
   overwriteExisting: boolean;
   downloadConcurrency: number;
+}
+
+export type TrackingProvider = "aniList" | "myAnimeList";
+
+export interface TrackingAccount {
+  provider: TrackingProvider;
+  connected: boolean;
+  username: string | null;
+  oauthConfigured: boolean;
+}
+
+export interface TrackingAuthEvent {
+  success: boolean;
+  message: string;
+}
+
+export interface TrackingCandidate {
+  id: number;
+  title: string;
+  alternateTitles: string[];
+  coverUrl: string | null;
+  chapters: number | null;
+  score: number;
+}
+
+export interface TrackingSuggestion {
+  provider: TrackingProvider;
+  automatic: boolean;
+  candidates: TrackingCandidate[];
+}
+
+export interface TrackingMapping {
+  publicationId: string;
+  provider: TrackingProvider;
+  mediaId: number;
+  mediaTitle: string;
+  lastSyncedChapter?: number;
+}
+
+export interface TrackingRemoteProgress {
+  provider: TrackingProvider;
+  mediaId: number;
+  progress: number;
+  totalChapters: number | null;
+  status: string | null;
+  updatedAt: string | null;
 }
 
 export interface ImportVolume {

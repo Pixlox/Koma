@@ -23,8 +23,7 @@
   "portability": {
     "homebrewOrWorkspaceDynamicLibraries": [],
     "dynamicLibraries": "Apple system frameworks and system libraries only",
-    "xzLinkage": "statically linked",
-    "localSigning": "linker ad-hoc; distribution signing and notarization require release credentials"
+    "xzLinkage": "statically linked"
   },
   "bundleMetadata": {
     "identifier": "me.pixlox.koma",
@@ -104,11 +103,6 @@
       "sha256": "a45b384102e846c046422a4fa7437abb14287377e97ded2fe70d19a8ec952607",
       "detailedRecord": "docs/release-evidence/mangafire-live-2026-07-18.json"
     }
-  },
-  "localAdHocBoundary": {
-    "distributionSigned": false,
-    "notarized": false,
-    "note": "The local build is ad-hoc signed. A production Developer ID signature and notarization require the owner's release credentials."
   },
   "privacy": {
     "comicPageScreenshotsCommittedToRepository": false,
