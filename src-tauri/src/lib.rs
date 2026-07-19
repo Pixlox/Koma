@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -41,6 +42,8 @@ struct AppState {
     default_import_directory: PathBuf,
     managed_library_directory: PathBuf,
     tracking: Arc<TrackingService>,
+    last_tracking_auth: Mutex<Option<TrackingAuthEvent>>,
+    handled_oauth_callbacks: Mutex<BTreeSet<u64>>,
     #[cfg(desktop)]
     discord: Mutex<Option<DiscordIpcClient>>,
 }
@@ -85,6 +88,8 @@ impl AppState {
             default_import_directory,
             managed_library_directory,
             tracking,
+            last_tracking_auth: Mutex::new(None),
+            handled_oauth_callbacks: Mutex::new(BTreeSet::new()),
             #[cfg(desktop)]
             discord: Mutex::new(None),
         })
@@ -956,6 +961,17 @@ fn begin_tracking_oauth(
 }
 
 #[tauri::command]
+fn take_tracking_auth(
+    state: State<'_, AppState>,
+) -> Result<Option<TrackingAuthEvent>, CommandError> {
+    state
+        .last_tracking_auth
+        .lock()
+        .map_err(|_| tracking_error("tracking authorization lock was poisoned".to_owned()))
+        .map(|mut event| event.take())
+}
+
+#[tauri::command]
 fn disconnect_tracking(
     state: State<'_, AppState>,
     provider: TrackingProvider,
@@ -995,9 +1011,50 @@ fn set_tracking_mapping(
     state.tracking.set_mapping(mapping).map_err(tracking_error)
 }
 
+#[tauri::command]
+fn remove_tracking_mapping(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    provider: TrackingProvider,
+) -> Result<(), CommandError> {
+    state
+        .tracking
+        .remove_mapping(publication_id, provider)
+        .map_err(tracking_error)
+}
+
+#[tauri::command]
+async fn tracking_remote_progress(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+) -> Result<Vec<tracking::TrackingRemoteProgress>, CommandError> {
+    state
+        .tracking
+        .remote_progress(publication_id)
+        .await
+        .map_err(tracking_error)
+}
+
 fn handle_tracking_oauth_url(app: AppHandle, callback: String) {
     if !callback.starts_with("koma://oauth/") {
         return;
+    }
+    let mut hasher = DefaultHasher::new();
+    callback.hash(&mut hasher);
+    let callback_id = hasher.finish();
+    {
+        let state = app.state::<AppState>();
+        let Ok(mut handled) = state.handled_oauth_callbacks.lock() else {
+            return;
+        };
+        if !handled.insert(callback_id) {
+            return;
+        }
+        if handled.len() > 32
+            && let Some(oldest) = handled.first().copied()
+        {
+            handled.remove(&oldest);
+        }
     }
     let tracking = Arc::clone(&app.state::<AppState>().tracking);
     tauri::async_runtime::spawn(async move {
@@ -1014,6 +1071,12 @@ fn handle_tracking_oauth_url(app: AppHandle, callback: String) {
                 message,
             },
         };
+        if !event.success {
+            eprintln!("tracking authorization failed: {}", event.message);
+        }
+        if let Ok(mut last_event) = app.state::<AppState>().last_tracking_auth.lock() {
+            *last_event = Some(event.clone());
+        }
         let _ = app.emit("koma://tracking-auth", event);
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.show();
@@ -1576,6 +1639,9 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_single_instance::init(
             |app, arguments, working_directory| {
+                for argument in &arguments {
+                    handle_tracking_oauth_url(app.clone(), argument.clone());
+                }
                 let paths = open_paths_from_arguments(&arguments, Path::new(&working_directory));
                 queue_open_paths(app, paths);
                 if let Some(window) = app.get_webview_window("main") {
@@ -1621,10 +1687,13 @@ pub fn run() {
             record_reading_time,
             tracking_accounts,
             begin_tracking_oauth,
+            take_tracking_auth,
             disconnect_tracking,
             suggest_tracking,
             tracking_mappings,
             set_tracking_mapping,
+            remove_tracking_mapping,
+            tracking_remote_progress,
             add_bookmark,
             update_bookmark,
             remove_bookmark,

@@ -1283,6 +1283,7 @@ input:focus-visible,
 }
 
 .tracking-matcher {
+  position: relative;
   display: grid;
   gap: 8px;
   padding: 14px 0;
@@ -1293,11 +1294,46 @@ input:focus-visible,
 
 .tracking-match {
   display: grid;
-  grid-template-columns: 82px minmax(0, 1fr);
+  grid-template-columns: 82px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   color: var(--muted);
   font-size: 10px;
+}
+
+.tracking-refresh {
+  position: absolute;
+  top: 8px;
+  right: 0;
+  width: 27px;
+  height: 27px;
+}
+
+.tracking-match-details {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.tracking-match-details strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tracking-progress {
+  color: var(--faint);
+  font-size: 9px;
+}
+
+.tracking-match-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.tracking-match-actions .text-button {
+  font-size: 9px;
 }
 
 .tracking-match strong,
@@ -1308,6 +1344,7 @@ input:focus-visible,
 }
 
 .tracking-match select {
+  grid-column: 2 / -1;
   width: 100%;
   height: 31px;
   padding: 0 8px;

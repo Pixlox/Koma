@@ -17,6 +17,12 @@ const ANILIST_REDIRECT_URI: &str = "koma://oauth/anilist";
 const MAL_REDIRECT_URI: &str = "koma://oauth/myanimelist";
 const OAUTH_WINDOW_SECONDS: i64 = 10 * 60;
 
+fn mal_client_secret() -> Option<&'static str> {
+    option_env!("KOMA_MAL_CLIENT_SECRET")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TrackingProvider {
@@ -89,6 +95,19 @@ pub struct TrackingMapping {
     pub provider: TrackingProvider,
     pub media_id: u64,
     pub media_title: String,
+    #[serde(default)]
+    pub last_synced_chapter: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackingRemoteProgress {
+    pub provider: TrackingProvider,
+    pub media_id: u64,
+    pub progress: u32,
+    pub total_chapters: Option<u32>,
+    pub status: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,19 +224,25 @@ impl TrackingService {
         .map_err(|error| error.to_string())?;
         {
             let mut query = url.query_pairs_mut();
-            query
-                .append_pair("client_id", client_id)
-                .append_pair("redirect_uri", provider.redirect_uri())
-                .append_pair("state", &state);
             match provider {
                 TrackingProvider::AniList => {
-                    query.append_pair("response_type", "token");
+                    // AniList's implicit flow uses the redirect registered on the
+                    // application and rejects authorization-only parameters that
+                    // are not part of its documented native-client request.
+                    query
+                        .append_pair("client_id", client_id)
+                        .append_pair("response_type", "token");
                 }
                 TrackingProvider::MyAnimeList => {
-                    query.append_pair("response_type", "code").append_pair(
-                        "code_challenge",
-                        code_verifier.as_deref().unwrap_or_default(),
-                    );
+                    query
+                        .append_pair("client_id", client_id)
+                        .append_pair("redirect_uri", provider.redirect_uri())
+                        .append_pair("state", &state)
+                        .append_pair("response_type", "code")
+                        .append_pair(
+                            "code_challenge",
+                            code_verifier.as_deref().unwrap_or_default(),
+                        );
                 }
             }
         }
@@ -229,7 +254,7 @@ impl TrackingService {
         if url.scheme() != "koma" || url.host_str() != Some("oauth") {
             return Err("Koma rejected an unexpected OAuth callback".to_owned());
         }
-        let provider = match url.path() {
+        let provider = match url.path().trim_end_matches('/') {
             "/anilist" => TrackingProvider::AniList,
             "/myanimelist" => TrackingProvider::MyAnimeList,
             _ => return Err("Koma rejected an unknown OAuth provider".to_owned()),
@@ -254,9 +279,6 @@ impl TrackingService {
                 provider_display_name(provider)
             ));
         }
-        let returned_state = parameters
-            .get("state")
-            .ok_or_else(|| "OAuth callback did not include its security state".to_owned())?;
         let pending = {
             let mut config = self
                 .config
@@ -269,8 +291,13 @@ impl TrackingService {
             self.save_config(&config)?;
             pending
         };
-        if pending.state != *returned_state {
-            return Err("OAuth security state did not match".to_owned());
+        if provider == TrackingProvider::MyAnimeList {
+            let returned_state = parameters
+                .get("state")
+                .ok_or_else(|| "OAuth callback did not include its security state".to_owned())?;
+            if pending.state != *returned_state {
+                return Err("OAuth security state did not match".to_owned());
+            }
         }
         if Utc::now().timestamp() - pending.created_at > OAUTH_WINDOW_SECONDS {
             return Err("OAuth authorization expired; start again from Settings".to_owned());
@@ -408,16 +435,55 @@ impl TrackingService {
             .collect())
     }
 
+    pub fn remove_mapping(
+        &self,
+        publication_id: Uuid,
+        provider: TrackingProvider,
+    ) -> Result<(), String> {
+        let mut config = self
+            .config
+            .lock()
+            .map_err(|_| "tracking settings lock was poisoned".to_owned())?;
+        config.mappings.retain(|mapping| {
+            mapping.publication_id != publication_id || mapping.provider != provider
+        });
+        self.save_config(&config)
+    }
+
+    pub async fn remote_progress(
+        &self,
+        publication_id: Uuid,
+    ) -> Result<Vec<TrackingRemoteProgress>, String> {
+        let mappings = self.mappings(publication_id)?;
+        let mut progress = Vec::with_capacity(mappings.len());
+        for mapping in mappings {
+            let token = self.access_token(mapping.provider).await?;
+            progress.push(match mapping.provider {
+                TrackingProvider::AniList => {
+                    self.anilist_remote_progress(&token, mapping.media_id)
+                        .await?
+                }
+                TrackingProvider::MyAnimeList => {
+                    self.mal_remote_progress(&token, mapping.media_id).await?
+                }
+            });
+        }
+        Ok(progress)
+    }
+
     pub async fn sync_progress(&self, publication_id: Uuid, chapter: u32) {
         let mappings = match self.mappings(publication_id) {
             Ok(mappings) => mappings,
             Err(_) => return,
         };
-        for mapping in mappings {
+        for mapping in mappings
+            .into_iter()
+            .filter(|mapping| chapter > mapping.last_synced_chapter)
+        {
             let Ok(token) = self.access_token(mapping.provider).await else {
                 continue;
             };
-            let _ = match mapping.provider {
+            let result = match mapping.provider {
                 TrackingProvider::AniList => {
                     self.sync_anilist(&token, mapping.media_id, chapter).await
                 }
@@ -425,7 +491,37 @@ impl TrackingService {
                     self.sync_mal(&token, mapping.media_id, chapter).await
                 }
             };
+            if let Ok(synced_chapter) = result {
+                let _ = self.mark_synced(
+                    publication_id,
+                    mapping.provider,
+                    mapping.media_id,
+                    synced_chapter,
+                );
+            }
         }
+    }
+
+    fn mark_synced(
+        &self,
+        publication_id: Uuid,
+        provider: TrackingProvider,
+        media_id: u64,
+        chapter: u32,
+    ) -> Result<(), String> {
+        let mut config = self
+            .config
+            .lock()
+            .map_err(|_| "tracking settings lock was poisoned".to_owned())?;
+        if let Some(mapping) = config.mappings.iter_mut().find(|mapping| {
+            mapping.publication_id == publication_id
+                && mapping.provider == provider
+                && mapping.media_id == media_id
+        }) {
+            mapping.last_synced_chapter = mapping.last_synced_chapter.max(chapter);
+            self.save_config(&config)?;
+        }
+        Ok(())
     }
 
     fn token_bundle(&self, provider: TrackingProvider) -> Result<StoredToken, String> {
@@ -470,25 +566,25 @@ impl TrackingService {
         let client_id = TrackingProvider::MyAnimeList
             .client_id()
             .ok_or_else(|| "MyAnimeList OAuth is not configured".to_owned())?;
-        let response = self
-            .client
-            .post("https://myanimelist.net/v1/oauth2/token")
-            .basic_auth(client_id, Some(""))
-            .form(&[
-                ("client_id", client_id),
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", MAL_REDIRECT_URI),
-                ("code_verifier", code_verifier),
-            ])
+        let mut form = vec![
+            ("client_id", client_id),
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", MAL_REDIRECT_URI),
+            ("code_verifier", code_verifier),
+        ];
+        let mut request = self.client.post("https://myanimelist.net/v1/oauth2/token");
+        if let Some(client_secret) = mal_client_secret() {
+            form.push(("client_secret", client_secret));
+        } else {
+            request = request.basic_auth(client_id, Some(""));
+        }
+        let response = request
+            .form(&form)
             .send()
             .await
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| format!("MyAnimeList token exchange failed: {error}"))?
-            .json::<OAuthTokenResponse>()
-            .await
             .map_err(|error| error.to_string())?;
+        let response = parse_mal_token_response(response, "token exchange").await?;
         Ok(StoredToken {
             access_token: response.access_token,
             refresh_token: response.refresh_token,
@@ -506,23 +602,23 @@ impl TrackingService {
             .refresh_token
             .as_deref()
             .ok_or_else(|| "MyAnimeList authorization expired; connect again".to_owned())?;
-        let response = self
-            .client
-            .post("https://myanimelist.net/v1/oauth2/token")
-            .basic_auth(client_id, Some(""))
-            .form(&[
-                ("client_id", client_id),
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_token),
-            ])
+        let mut form = vec![
+            ("client_id", client_id),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ];
+        let mut request = self.client.post("https://myanimelist.net/v1/oauth2/token");
+        if let Some(client_secret) = mal_client_secret() {
+            form.push(("client_secret", client_secret));
+        } else {
+            request = request.basic_auth(client_id, Some(""));
+        }
+        let response = request
+            .form(&form)
             .send()
             .await
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| format!("MyAnimeList token refresh failed: {error}"))?
-            .json::<OAuthTokenResponse>()
-            .await
             .map_err(|error| error.to_string())?;
+        let response = parse_mal_token_response(response, "token refresh").await?;
         let refreshed = StoredToken {
             access_token: response.access_token,
             refresh_token: response.refresh_token.or(token.refresh_token),
@@ -698,7 +794,7 @@ impl TrackingService {
             .collect())
     }
 
-    async fn sync_anilist(&self, token: &str, media_id: u64, chapter: u32) -> Result<(), String> {
+    async fn sync_anilist(&self, token: &str, media_id: u64, chapter: u32) -> Result<u32, String> {
         let username = self.account_name(TrackingProvider::AniList)?;
         let current = self
             .client
@@ -716,11 +812,10 @@ impl TrackingService {
             .json::<serde_json::Value>()
             .await
             .map_err(|error| error.to_string())?;
-        if current["data"]["MediaList"]["progress"]
-            .as_u64()
-            .is_some_and(|progress| progress >= u64::from(chapter))
+        if let Some(progress) = current["data"]["MediaList"]["progress"].as_u64()
+            && progress >= u64::from(chapter)
         {
-            return Ok(());
+            return Ok(progress.min(u64::from(u32::MAX)) as u32);
         }
         self.client
             .post("https://graphql.anilist.co")
@@ -734,10 +829,58 @@ impl TrackingService {
             .map_err(|error| error.to_string())?
             .error_for_status()
             .map_err(|error| error.to_string())?;
-        Ok(())
+        Ok(chapter)
     }
 
-    async fn sync_mal(&self, token: &str, media_id: u64, chapter: u32) -> Result<(), String> {
+    async fn anilist_remote_progress(
+        &self,
+        token: &str,
+        media_id: u64,
+    ) -> Result<TrackingRemoteProgress, String> {
+        let response = self
+            .client
+            .post("https://graphql.anilist.co")
+            .bearer_auth(token)
+            .json(&json!({
+                "query": "query ($mediaId: Int) { Media(id: $mediaId, type: MANGA) { chapters mediaListEntry { progress status updatedAt } } }",
+                "variables": { "mediaId": media_id }
+            }))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(error) = response["errors"]
+            .as_array()
+            .and_then(|errors| errors.first())
+            .and_then(|error| error["message"].as_str())
+        {
+            return Err(format!("AniList: {error}"));
+        }
+        let media = &response["data"]["Media"];
+        let entry = &media["mediaListEntry"];
+        Ok(TrackingRemoteProgress {
+            provider: TrackingProvider::AniList,
+            media_id,
+            progress: entry["progress"]
+                .as_u64()
+                .unwrap_or(0)
+                .min(u64::from(u32::MAX)) as u32,
+            total_chapters: media["chapters"]
+                .as_u64()
+                .and_then(|value| value.try_into().ok()),
+            status: entry["status"].as_str().map(str::to_owned),
+            updated_at: entry["updatedAt"]
+                .as_i64()
+                .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
+                .map(|date| date.to_rfc3339()),
+        })
+    }
+
+    async fn sync_mal(&self, token: &str, media_id: u64, chapter: u32) -> Result<u32, String> {
         let current = self
             .client
             .get(format!("https://api.myanimelist.net/v2/manga/{media_id}"))
@@ -751,11 +894,10 @@ impl TrackingService {
             .json::<serde_json::Value>()
             .await
             .map_err(|error| error.to_string())?;
-        if current["my_list_status"]["num_chapters_read"]
-            .as_u64()
-            .is_some_and(|progress| progress >= u64::from(chapter))
+        if let Some(progress) = current["my_list_status"]["num_chapters_read"].as_u64()
+            && progress >= u64::from(chapter)
         {
-            return Ok(());
+            return Ok(progress.min(u64::from(u32::MAX)) as u32);
         }
         self.client
             .patch(format!(
@@ -768,7 +910,70 @@ impl TrackingService {
             .map_err(|error| error.to_string())?
             .error_for_status()
             .map_err(|error| error.to_string())?;
-        Ok(())
+        Ok(chapter)
+    }
+
+    async fn mal_remote_progress(
+        &self,
+        token: &str,
+        media_id: u64,
+    ) -> Result<TrackingRemoteProgress, String> {
+        let response = self
+            .client
+            .get(format!("https://api.myanimelist.net/v2/manga/{media_id}"))
+            .bearer_auth(token)
+            .query(&[("fields", "num_chapters,my_list_status")])
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| error.to_string())?;
+        let entry = &response["my_list_status"];
+        Ok(TrackingRemoteProgress {
+            provider: TrackingProvider::MyAnimeList,
+            media_id,
+            progress: entry["num_chapters_read"]
+                .as_u64()
+                .unwrap_or(0)
+                .min(u64::from(u32::MAX)) as u32,
+            total_chapters: response["num_chapters"]
+                .as_u64()
+                .filter(|value| *value > 0)
+                .and_then(|value| value.try_into().ok()),
+            status: entry["status"].as_str().map(str::to_owned),
+            updated_at: entry["updated_at"].as_str().map(str::to_owned),
+        })
+    }
+}
+
+async fn parse_mal_token_response(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<OAuthTokenResponse, String> {
+    let status = response.status();
+    if status.is_success() {
+        return response
+            .json::<OAuthTokenResponse>()
+            .await
+            .map_err(|error| format!("MyAnimeList returned an invalid token response: {error}"));
+    }
+    let detail = response.text().await.unwrap_or_default();
+    let detail = detail.trim().chars().take(512).collect::<String>();
+    if status == reqwest::StatusCode::UNAUTHORIZED && mal_client_secret().is_none() {
+        return Err(
+            "MyAnimeList rejected client authentication. This MAL application is configured as a web client, so add KOMA_MAL_CLIENT_SECRET to the build or register a public native client."
+                .to_owned(),
+        );
+    }
+    if detail.is_empty() {
+        Err(format!("MyAnimeList {operation} failed: HTTP {status}"))
+    } else {
+        Err(format!(
+            "MyAnimeList {operation} failed: HTTP {status}: {detail}"
+        ))
     }
 }
 
@@ -840,6 +1045,68 @@ mod tests {
     }
 
     #[test]
+    fn successful_sync_progress_is_monotonic_and_persistent() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("tracking.json");
+        let service = TrackingService::new(&path).expect("service");
+        let publication_id = Uuid::new_v4();
+        service
+            .set_mapping(TrackingMapping {
+                publication_id,
+                provider: TrackingProvider::AniList,
+                media_id: 42,
+                media_title: "Test manga".to_owned(),
+                last_synced_chapter: 0,
+            })
+            .expect("mapping");
+        service
+            .mark_synced(publication_id, TrackingProvider::AniList, 42, 12)
+            .expect("first sync");
+        service
+            .mark_synced(publication_id, TrackingProvider::AniList, 42, 8)
+            .expect("older sync");
+
+        let reopened = TrackingService::new(path).expect("reopen service");
+        let mappings = reopened.mappings(publication_id).expect("mappings");
+        assert_eq!(mappings[0].last_synced_chapter, 12);
+    }
+
+    #[test]
+    fn a_tracking_match_can_be_replaced_or_removed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("tracking.json");
+        let service = TrackingService::new(&path).expect("service");
+        let publication_id = Uuid::new_v4();
+        let mapping = |media_id, media_title: &str| TrackingMapping {
+            publication_id,
+            provider: TrackingProvider::AniList,
+            media_id,
+            media_title: media_title.to_owned(),
+            last_synced_chapter: 0,
+        };
+
+        service
+            .set_mapping(mapping(10, "Wrong title"))
+            .expect("initial mapping");
+        service
+            .set_mapping(mapping(20, "Correct title"))
+            .expect("replacement mapping");
+        let mappings = service.mappings(publication_id).expect("mappings");
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].media_id, 20);
+
+        service
+            .remove_mapping(publication_id, TrackingProvider::AniList)
+            .expect("remove mapping");
+        assert!(
+            service
+                .mappings(publication_id)
+                .expect("mappings")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn oauth_urls_use_provider_specific_secure_flows() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let service =
@@ -854,23 +1121,14 @@ mod tests {
         let anilist_query = anilist.query_pairs().collect::<HashMap<_, _>>();
         assert_eq!(anilist.scheme(), "https");
         assert_eq!(anilist.host_str(), Some("anilist.co"));
-        assert_eq!(
-            anilist_query
-                .get("redirect_uri")
-                .map(|value| value.as_ref()),
-            Some(ANILIST_REDIRECT_URI)
-        );
+        assert!(!anilist_query.contains_key("redirect_uri"));
         assert_eq!(
             anilist_query
                 .get("response_type")
                 .map(|value| value.as_ref()),
             Some("token")
         );
-        assert!(
-            anilist_query
-                .get("state")
-                .is_some_and(|state| state.len() == 64)
-        );
+        assert!(!anilist_query.contains_key("state"));
 
         let mal = Url::parse(
             &service

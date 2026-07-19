@@ -1,6 +1,7 @@
 fn main() {
     load_oauth_client("KOMA_ANILIST_CLIENT_ID");
     load_oauth_client("KOMA_MAL_CLIENT_ID");
+    load_oauth_client("KOMA_MAL_CLIENT_SECRET");
     tauri_build::build()
 }
 

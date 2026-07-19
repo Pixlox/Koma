@@ -40,6 +40,7 @@ import type {
   TrackingAccount,
   TrackingAuthEvent,
   TrackingMapping,
+  TrackingRemoteProgress,
   TrackingProvider,
   TrackingSuggestion,
 } from "../types";
@@ -106,6 +107,7 @@ export interface KomaBackend {
   ): Promise<number>;
   trackingAccounts(): Promise<TrackingAccount[]>;
   beginTrackingOAuth(provider: TrackingProvider): Promise<void>;
+  takeTrackingAuth(): Promise<TrackingAuthEvent | null>;
   onTrackingAuth(
     handler: (event: TrackingAuthEvent) => void,
   ): Promise<UnlistenFn>;
@@ -116,6 +118,13 @@ export interface KomaBackend {
   ): Promise<TrackingSuggestion>;
   trackingMappings(publicationId: string): Promise<TrackingMapping[]>;
   setTrackingMapping(mapping: TrackingMapping): Promise<void>;
+  removeTrackingMapping(
+    publicationId: string,
+    provider: TrackingProvider,
+  ): Promise<void>;
+  trackingRemoteProgress(
+    publicationId: string,
+  ): Promise<TrackingRemoteProgress[]>;
   addBookmark(
     publicationId: string,
     pageIndex: number,
@@ -538,6 +547,10 @@ class NativeBackend implements KomaBackend {
     await openUrl(authorizationUrl);
   }
 
+  takeTrackingAuth() {
+    return invoke<TrackingAuthEvent | null>("take_tracking_auth");
+  }
+
   onTrackingAuth(handler: (event: TrackingAuthEvent) => void) {
     return listen<TrackingAuthEvent>("koma://tracking-auth", ({ payload }) =>
       handler(payload),
@@ -558,6 +571,19 @@ class NativeBackend implements KomaBackend {
 
   setTrackingMapping(mapping: TrackingMapping) {
     return invoke<void>("set_tracking_mapping", { mapping });
+  }
+
+  removeTrackingMapping(publicationId: string, provider: TrackingProvider) {
+    return invoke<void>("remove_tracking_mapping", {
+      publicationId,
+      provider,
+    });
+  }
+
+  trackingRemoteProgress(publicationId: string) {
+    return invoke<TrackingRemoteProgress[]>("tracking_remote_progress", {
+      publicationId,
+    });
   }
 
   addBookmark(
@@ -1046,6 +1072,10 @@ class PreviewBackend implements KomaBackend {
     return Promise.resolve();
   }
 
+  takeTrackingAuth() {
+    return Promise.resolve(null);
+  }
+
   onTrackingAuth(handler: (event: TrackingAuthEvent) => void) {
     this.trackingAuthHandlers.add(handler);
     return Promise.resolve(() => this.trackingAuthHandlers.delete(handler));
@@ -1092,6 +1122,30 @@ class PreviewBackend implements KomaBackend {
     );
     this.mappings.push(mapping);
     return Promise.resolve();
+  }
+
+  removeTrackingMapping(publicationId: string, provider: TrackingProvider) {
+    this.mappings = this.mappings.filter(
+      (mapping) =>
+        mapping.publicationId !== publicationId ||
+        mapping.provider !== provider,
+    );
+    return Promise.resolve();
+  }
+
+  trackingRemoteProgress(publicationId: string) {
+    return Promise.resolve(
+      this.mappings
+        .filter((mapping) => mapping.publicationId === publicationId)
+        .map((mapping) => ({
+          provider: mapping.provider,
+          mediaId: mapping.mediaId,
+          progress: mapping.lastSyncedChapter ?? 0,
+          totalChapters: null,
+          status: "reading",
+          updatedAt: null,
+        })),
+    );
   }
 
   addBookmark(

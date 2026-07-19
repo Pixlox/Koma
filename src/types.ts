@@ -323,6 +323,16 @@ export interface TrackingMapping {
   provider: TrackingProvider;
   mediaId: number;
   mediaTitle: string;
+  lastSyncedChapter?: number;
+}
+
+export interface TrackingRemoteProgress {
+  provider: TrackingProvider;
+  mediaId: number;
+  progress: number;
+  totalChapters: number | null;
+  status: string | null;
+  updatedAt: string | null;
 }
 
 export interface ImportVolume {

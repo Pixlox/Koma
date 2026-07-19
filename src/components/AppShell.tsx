@@ -63,9 +63,11 @@ import type {
   PublicationFormat,
   MotionMode,
   TrackingAccount,
+  TrackingAuthEvent,
   TrackingCandidate,
   TrackingMapping,
   TrackingProvider,
+  TrackingRemoteProgress,
   ThemeMode,
 } from "../types";
 
@@ -1353,22 +1355,29 @@ function TrackingSettings() {
     let active = true;
     refresh();
     let unlisten: (() => void) | null = null;
+    const handleAuth = (event: TrackingAuthEvent) => {
+      if (!active) return;
+      setBusy(null);
+      if (event.success) {
+        setError(null);
+        setNotice(event.message);
+        refresh();
+      } else {
+        setNotice(null);
+        setError(event.message);
+      }
+    };
     void backend
-      .onTrackingAuth((event) => {
-        if (!active) return;
-        setBusy(null);
-        if (event.success) {
-          setError(null);
-          setNotice(event.message);
-          refresh();
-        } else {
-          setNotice(null);
-          setError(event.message);
-        }
-      })
+      .onTrackingAuth(handleAuth)
       .then((next) => {
-        if (active) unlisten = next;
-        else next();
+        if (!active) {
+          next();
+          return;
+        }
+        unlisten = next;
+        void backend.takeTrackingAuth().then((event) => {
+          if (event !== null) handleAuth(event);
+        });
       });
     return () => {
       active = false;
@@ -1455,16 +1464,49 @@ function TrackingSettings() {
 function TrackingMatcher({ item }: { item: LibraryItem }) {
   const [accounts, setAccounts] = useState<TrackingAccount[]>([]);
   const [mappings, setMappings] = useState<TrackingMapping[]>([]);
+  const [remoteProgress, setRemoteProgress] = useState<
+    TrackingRemoteProgress[]
+  >([]);
   const [candidates, setCandidates] = useState<
     Partial<Record<TrackingProvider, TrackingCandidate[]>>
   >({});
+  const [editing, setEditing] = useState<TrackingProvider | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [matchError, setMatchError] = useState<string | null>(null);
+
+  const refreshProgress = () => {
+    setRefreshing(true);
+    setMatchError(null);
+    return backend
+      .trackingRemoteProgress(item.id)
+      .then(setRemoteProgress)
+      .catch((caught) => setMatchError(errorMessage(caught)))
+      .finally(() => setRefreshing(false));
+  };
+
+  const loadCandidates = (provider: TrackingProvider) => {
+    setEditing(provider);
+    setLoading(true);
+    setMatchError(null);
+    void backend
+      .suggestTracking(provider, item.series ?? item.title)
+      .then((suggestion) => {
+        setCandidates((current) => ({
+          ...current,
+          [provider]: suggestion.candidates,
+        }));
+      })
+      .catch((caught) => setMatchError(errorMessage(caught)))
+      .finally(() => setLoading(false));
+  };
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setMatchError(null);
+    setEditing(null);
+    setRemoteProgress([]);
     void Promise.all([
       backend.trackingAccounts(),
       backend.trackingMappings(item.id),
@@ -1517,6 +1559,8 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
             suggestions.map((result) => [result.provider, result.candidates]),
           ),
         );
+        const progress = await backend.trackingRemoteProgress(item.id);
+        if (active) setRemoteProgress(progress);
       })
       .catch((caught) => {
         if (active) setMatchError(errorMessage(caught));
@@ -1535,6 +1579,16 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
   return (
     <div className="tracking-matcher">
       <span className="eyebrow">{tr("Reading tracking")}</span>
+      <button
+        type="button"
+        className="icon-button tracking-refresh"
+        aria-label={tr("Refresh")}
+        title={tr("Refresh")}
+        disabled={refreshing}
+        onClick={() => void refreshProgress()}
+      >
+        <RefreshCw size={13} className={refreshing ? "spin" : undefined} />
+      </button>
       {connected.map((account) => {
         const mapping = mappings.find(
           (candidate) => candidate.provider === account.provider,
@@ -1543,11 +1597,79 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
         const label =
           TRACKING_PROVIDERS.find((provider) => provider.id === account.provider)
             ?.label ?? account.provider;
-        if (mapping !== undefined) {
+        const progress = remoteProgress.find(
+          (candidate) =>
+            candidate.provider === account.provider &&
+            candidate.mediaId === mapping?.mediaId,
+        );
+        if (mapping !== undefined && editing !== account.provider) {
+          const status =
+            progress?.status === "CURRENT" || progress?.status === "reading"
+              ? tr("Reading")
+              : progress?.status === "COMPLETED" ||
+                  progress?.status === "completed"
+                ? tr("Completed")
+                : progress?.status
+                    ?.toLowerCase()
+                    .replaceAll("_", " ")
+                    .replace(/^\w/, (letter) => letter.toUpperCase());
           return (
             <div className="tracking-match" key={account.provider}>
               <span>{label}</span>
-              <strong>{mapping.mediaTitle}</strong>
+              <div className="tracking-match-details">
+                <strong>{mapping.mediaTitle}</strong>
+                {progress !== undefined && (
+                  <span
+                    className="tracking-progress"
+                    title={
+                      progress.updatedAt === null
+                        ? undefined
+                        : new Date(progress.updatedAt).toLocaleString(locale())
+                    }
+                  >
+                    {tr("Chapter")} {progress.progress}
+                    {progress.totalChapters !== null
+                      ? ` / ${progress.totalChapters}`
+                      : ""}
+                    {status !== undefined ? ` · ${status}` : ""}
+                  </span>
+                )}
+              </div>
+              <div className="tracking-match-actions">
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => loadCandidates(account.provider)}
+                >
+                  {tr("Change")}
+                </button>
+                <button
+                  type="button"
+                  className="text-button danger-text"
+                  onClick={() => {
+                    void backend
+                      .removeTrackingMapping(item.id, account.provider)
+                      .then(() => {
+                        setMappings((current) =>
+                          current.filter(
+                            (candidate) =>
+                              candidate.provider !== account.provider,
+                          ),
+                        );
+                        setRemoteProgress((current) =>
+                          current.filter(
+                            (candidate) =>
+                              candidate.provider !== account.provider,
+                          ),
+                        );
+                        loadCandidates(account.provider);
+                      })
+                      .catch((caught) => setMatchError(errorMessage(caught)));
+                  }}
+                >
+                  {tr("Unlink")}
+                </button>
+              </div>
             </div>
           );
         }
@@ -1573,7 +1695,15 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
                   mediaTitle: selected.title,
                 };
                 void backend.setTrackingMapping(next).then(() => {
-                  setMappings((current) => [...current, next]);
+                  setMappings((current) => [
+                    ...current.filter(
+                      (candidate) =>
+                        candidate.provider !== account.provider,
+                    ),
+                    next,
+                  ]);
+                  setEditing(null);
+                  void refreshProgress();
                 });
               }}
             >
