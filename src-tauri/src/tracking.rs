@@ -12,6 +12,9 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(debug_assertions)]
+const KEYRING_SERVICE: &str = "me.pixlox.koma.tracking.dev";
+#[cfg(not(debug_assertions))]
 const KEYRING_SERVICE: &str = "me.pixlox.koma.tracking";
 const ANILIST_REDIRECT_URI: &str = "koma://oauth/anilist";
 const MAL_REDIRECT_URI: &str = "koma://oauth/myanimelist";

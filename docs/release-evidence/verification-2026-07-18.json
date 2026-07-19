@@ -150,8 +150,6 @@
     "Windows runtime and installer behavior",
     "Linux runtime and package behavior",
     "physical iPhone and iPad behavior",
-    "Developer ID signing and notarization",
-    "App Store and TestFlight distribution",
     "Windows code signing",
     "remote GitHub Actions execution"
   ]

@@ -58,7 +58,6 @@
     "comicPageScreenshotsCommittedToRepository": false
   },
   "remainingReleaseBoundary": [
-    "A physical iPhone or iPad was not tested.",
-    "App Store signing, provisioning, and submission require the owner's Apple release credentials."
+    "A physical iPhone or iPad was not tested."
   ]
 }

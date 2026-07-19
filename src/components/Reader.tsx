@@ -897,7 +897,7 @@ function ReaderToolbar({
       data-fullscreen={fullscreen}
       data-tauri-drag-region
     >
-      <div className="reader-toolbar-leading">
+      <div className="reader-toolbar-leading" data-tauri-drag-region>
         <button
           type="button"
           className="reader-icon-button"
@@ -906,9 +906,11 @@ function ReaderToolbar({
         >
           <ChevronLeft size={21} />
         </button>
-        <div className="reader-title">
-          <strong>{title}</strong>
-          {series !== null && series !== title && <span>{series}</span>}
+        <div className="reader-title" data-tauri-drag-region>
+          <strong data-tauri-drag-region>{title}</strong>
+          {series !== null && series !== title && (
+            <span data-tauri-drag-region>{series}</span>
+          )}
         </div>
       </div>
       <label className="reader-mode-button">

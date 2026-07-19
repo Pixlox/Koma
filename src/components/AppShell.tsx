@@ -1069,7 +1069,7 @@ function DetailInspector({ item }: { item: LibraryItem }) {
         </button>
         <button
           type="button"
-          className="secondary-button"
+          className="secondary-button inspector-reveal"
           onClick={() => void revealItem(item)}
         >
           <FolderOpen size={16} />
