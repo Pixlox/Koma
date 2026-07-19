@@ -1353,6 +1353,11 @@ input:focus-visible,
   border-radius: 6px;
 }
 
+.tracking-empty {
+  grid-column: 2 / -1;
+  color: var(--faint);
+}
+
 .danger-text {
   color: var(--danger) !important;
 }

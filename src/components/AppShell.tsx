@@ -37,6 +37,7 @@ import {
 import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -1356,6 +1357,13 @@ function trackingStatus(status: string | null | undefined): string | null {
   return tr(labels[key] ?? "Unknown");
 }
 
+function trackingProviderLabel(provider: TrackingProvider): string {
+  return (
+    TRACKING_PROVIDERS.find((candidate) => candidate.id === provider)?.label ??
+    provider
+  );
+}
+
 function TrackingSettings() {
   const [accounts, setAccounts] = useState<TrackingAccount[]>([]);
   const [busy, setBusy] = useState<TrackingProvider | null>(null);
@@ -1485,6 +1493,7 @@ function TrackingSettings() {
 }
 
 function TrackingMatcher({ item }: { item: LibraryItem }) {
+  const notify = useKomaStore((state) => state.notify);
   const [accounts, setAccounts] = useState<TrackingAccount[]>([]);
   const [mappings, setMappings] = useState<TrackingMapping[]>([]);
   const [remoteProgress, setRemoteProgress] = useState<
@@ -1494,24 +1503,38 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
     Partial<Record<TrackingProvider, TrackingCandidate[]>>
   >({});
   const [editing, setEditing] = useState<TrackingProvider | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [lookupState, setLookupState] = useState<
+    Partial<Record<TrackingProvider, "loading" | "ready" | "empty">>
+  >({});
   const [refreshing, setRefreshing] = useState(false);
-  const [matchError, setMatchError] = useState<string | null>(null);
+
+  const notifyLookupFailure = useCallback(
+    (provider?: TrackingProvider) => {
+      notify(
+        provider === undefined
+          ? tr("Reading tracking could not be completed.")
+          : tr("Couldn’t search {{name}}", {
+              name: trackingProviderLabel(provider),
+            }),
+        tr("Please try again."),
+        "warning",
+      );
+    },
+    [notify],
+  );
 
   const refreshProgress = () => {
     setRefreshing(true);
-    setMatchError(null);
     return backend
       .trackingRemoteProgress(item.id)
       .then(setRemoteProgress)
-      .catch((caught) => setMatchError(errorMessage(caught)))
+      .catch(() => notifyLookupFailure())
       .finally(() => setRefreshing(false));
   };
 
   const loadCandidates = (provider: TrackingProvider) => {
     setEditing(provider);
-    setLoading(true);
-    setMatchError(null);
+    setLookupState((current) => ({ ...current, [provider]: "loading" }));
     void backend
       .suggestTracking(provider, item.series ?? item.title)
       .then((suggestion) => {
@@ -1519,17 +1542,25 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
           ...current,
           [provider]: suggestion.candidates,
         }));
+        setLookupState((current) => ({
+          ...current,
+          [provider]:
+            suggestion.candidates.length === 0 ? "empty" : "ready",
+        }));
       })
-      .catch((caught) => setMatchError(errorMessage(caught)))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        setCandidates((current) => ({ ...current, [provider]: [] }));
+        setLookupState((current) => ({ ...current, [provider]: "empty" }));
+        notifyLookupFailure(provider);
+      });
   };
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setMatchError(null);
     setEditing(null);
     setRemoteProgress([]);
+    setCandidates({});
+    setLookupState({});
     void Promise.all([
       backend.trackingAccounts(),
       backend.trackingMappings(item.id),
@@ -1539,15 +1570,20 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
         setAccounts(nextAccounts);
         setMappings(nextMappings);
         const connected = nextAccounts.filter((account) => account.connected);
+        const unmatched = connected.filter(
+          (account) =>
+            !nextMappings.some(
+              (mapping) => mapping.provider === account.provider,
+            ),
+        );
+        setLookupState(
+          Object.fromEntries(
+            unmatched.map((account) => [account.provider, "loading"]),
+          ),
+        );
         const suggestions = await Promise.all(
-          connected
-            .filter(
-              (account) =>
-                !nextMappings.some(
-                  (mapping) => mapping.provider === account.provider,
-                ),
-            )
-            .map(async (account) => {
+          unmatched.map(async (account) => {
+            try {
               const suggestion = await backend.suggestTracking(
                 account.provider,
                 item.series ?? item.title,
@@ -1561,16 +1597,33 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
                   mediaTitle: first.title,
                 };
                 await backend.setTrackingMapping(mapping);
-                return { provider: account.provider, mapping, candidates: [] };
+                return {
+                  provider: account.provider,
+                  mapping,
+                  candidates: [],
+                  failed: false,
+                };
               }
               return {
                 provider: account.provider,
                 mapping: null,
                 candidates: suggestion.candidates,
+                failed: false,
               };
-            }),
+            } catch {
+              return {
+                provider: account.provider,
+                mapping: null,
+                candidates: [],
+                failed: true,
+              };
+            }
+          }),
         );
         if (!active) return;
+        suggestions
+          .filter((result) => result.failed)
+          .forEach((result) => notifyLookupFailure(result.provider));
         setMappings((current) => [
           ...current,
           ...suggestions.flatMap((result) =>
@@ -1582,19 +1635,28 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
             suggestions.map((result) => [result.provider, result.candidates]),
           ),
         );
-        const progress = await backend.trackingRemoteProgress(item.id);
-        if (active) setRemoteProgress(progress);
+        setLookupState(
+          Object.fromEntries(
+            suggestions.map((result) => [
+              result.provider,
+              result.candidates.length === 0 ? "empty" : "ready",
+            ]),
+          ),
+        );
+        try {
+          const progress = await backend.trackingRemoteProgress(item.id);
+          if (active) setRemoteProgress(progress);
+        } catch {
+          if (active) notifyLookupFailure();
+        }
       })
-      .catch((caught) => {
-        if (active) setMatchError(errorMessage(caught));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
+      .catch(() => {
+        if (active) notifyLookupFailure();
       });
     return () => {
       active = false;
     };
-  }, [item.id, item.series, item.title]);
+  }, [item.id, item.series, item.title, notifyLookupFailure]);
 
   const connected = accounts.filter((account) => account.connected);
   if (connected.length === 0) return null;
@@ -1617,9 +1679,7 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
           (candidate) => candidate.provider === account.provider,
         );
         const options = candidates[account.provider] ?? [];
-        const label =
-          TRACKING_PROVIDERS.find((provider) => provider.id === account.provider)
-            ?.label ?? account.provider;
+        const label = trackingProviderLabel(account.provider);
         const progress = remoteProgress.find(
           (candidate) =>
             candidate.provider === account.provider &&
@@ -1678,7 +1738,7 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
                         );
                         loadCandidates(account.provider);
                       })
-                      .catch((caught) => setMatchError(errorMessage(caught)));
+                      .catch(() => notifyLookupFailure());
                   }}
                 >
                   {tr("Unlink")}
@@ -1687,12 +1747,27 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
             </div>
           );
         }
+        if (lookupState[account.provider] === "loading") {
+          return (
+            <div className="tracking-match" key={account.provider}>
+              <span>{label}</span>
+              <span className="tracking-empty">{tr("Matching…")}</span>
+            </div>
+          );
+        }
+        if (options.length === 0) {
+          return (
+            <div className="tracking-match" key={account.provider}>
+              <span>{label}</span>
+              <span className="tracking-empty">{tr("None found.")}</span>
+            </div>
+          );
+        }
         return (
           <label className="tracking-match" key={account.provider}>
             <span>{label}</span>
             <select
               value=""
-              disabled={loading || options.length === 0}
               aria-label={tr("Match {{title}} on {{name}}", {
                 title: item.title,
                 name: label,
@@ -1718,12 +1793,10 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
                   ]);
                   setEditing(null);
                   void refreshProgress();
-                });
+                }).catch(() => notifyLookupFailure());
               }}
             >
-              <option value="">
-                {loading ? tr("Matching…") : tr("Choose title")}
-              </option>
+              <option value="">{tr("Choose title")}</option>
               {options.map((candidate) => (
                 <option key={candidate.id} value={candidate.id}>
                   {candidate.title}
@@ -1733,7 +1806,6 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
           </label>
         );
       })}
-      {matchError !== null && <span className="danger-text">{matchError}</span>}
     </div>
   );
 }
