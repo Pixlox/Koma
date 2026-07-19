@@ -446,6 +446,23 @@
     "Zoom": "ซูม",
     "Zoom in": "ซูมเข้า",
     "Zoom out": "ซูมออก",
-    "Zoom presets": "ซูมที่ตั้งไว้ล่วงหน้า"
+    "Zoom presets": "ซูมที่ตั้งไว้ล่วงหน้า",
+    "Choose title": "เลือกเรื่อง",
+    "Connect": "เชื่อมต่อ",
+    "Connected as {{name}}": "เชื่อมต่อในชื่อ {{name}}",
+    "Deselect all": "ยกเลิกการเลือกทั้งหมด",
+    "Disconnect": "ยกเลิกการเชื่อมต่อ",
+    "Less than a minute": "น้อยกว่าหนึ่งนาที",
+    "Match {{title}} on {{name}}": "จับคู่ {{title}} บน {{name}}",
+    "Matching…": "กำลังจับคู่…",
+    "OAuth is not configured in this build.": "ยังไม่ได้ตั้งค่า OAuth ในบิลด์นี้",
+    "Reading time": "เวลาอ่าน",
+    "Reading tracking": "การติดตามการอ่าน",
+    "Select all": "เลือกทั้งหมด",
+    "Sync completed chapters to {{name}}.": "ซิงค์ตอนที่อ่านจบไปยัง {{name}}",
+    "{{count}} chapters selected": "เลือกแล้ว {{count}} ตอน",
+    "{{count}} hr": "{{count}} ชม.",
+    "{{count}} min": "{{count}} นาที",
+    "{{hours}} hr {{minutes}} min": "{{hours}} ชม. {{minutes}} นาที"
   }
 }

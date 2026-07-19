@@ -446,6 +446,23 @@
     "Zoom": "变焦",
     "Zoom in": "放大",
     "Zoom out": "缩小",
-    "Zoom presets": "缩放预设"
+    "Zoom presets": "缩放预设",
+    "Choose title": "选择作品",
+    "Connect": "连接",
+    "Connected as {{name}}": "已以 {{name}} 身份连接",
+    "Deselect all": "取消全选",
+    "Disconnect": "断开连接",
+    "Less than a minute": "不到一分钟",
+    "Match {{title}} on {{name}}": "在 {{name}} 上匹配 {{title}}",
+    "Matching…": "正在匹配…",
+    "OAuth is not configured in this build.": "此版本尚未配置 OAuth。",
+    "Reading time": "阅读时间",
+    "Reading tracking": "阅读记录同步",
+    "Select all": "全选",
+    "Sync completed chapters to {{name}}.": "将已读章节同步到 {{name}}。",
+    "{{count}} chapters selected": "已选择 {{count}} 章",
+    "{{count}} hr": "{{count}} 小时",
+    "{{count}} min": "{{count}} 分钟",
+    "{{hours}} hr {{minutes}} min": "{{hours}} 小时 {{minutes}} 分钟"
   }
 }

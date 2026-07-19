@@ -62,6 +62,10 @@ import type {
   LibraryViewMode,
   PublicationFormat,
   MotionMode,
+  TrackingAccount,
+  TrackingCandidate,
+  TrackingMapping,
+  TrackingProvider,
   ThemeMode,
 } from "../types";
 
@@ -93,6 +97,15 @@ function routeTitle(route: LibraryRoute): string {
 
 function formatProgress(progress: number): string {
   return `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
+}
+
+function formatReadingTime(seconds: number): string {
+  if (seconds < 60) return tr("Less than a minute");
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours === 0) return tr("{{count}} min", { count: minutes });
+  if (minutes === 0) return tr("{{count}} hr", { count: hours });
+  return tr("{{hours}} hr {{minutes}} min", { hours, minutes });
 }
 
 function modifierSymbol(): string {
@@ -1009,6 +1022,16 @@ function DetailInspector({ item }: { item: LibraryItem }) {
         </small>
       </div>
       <dl className="inspector-facts">
+        {item.currentChapter !== null && (
+          <div>
+            <dt>{tr("Chapter")}</dt>
+            <dd>{item.currentChapter}</dd>
+          </div>
+        )}
+        <div>
+          <dt>{tr("Reading time")}</dt>
+          <dd>{formatReadingTime(item.totalReadingSeconds)}</dd>
+        </div>
         <div>
           <dt>{tr("Last read")}</dt>
           <dd>{formatRelativeDate(item.lastOpenedAt)}</dd>
@@ -1024,6 +1047,7 @@ function DetailInspector({ item }: { item: LibraryItem }) {
           </dd>
         </div>
       </dl>
+      <TrackingMatcher item={item} />
       <div className="inspector-actions">
         <button
           type="button"
@@ -1221,6 +1245,9 @@ function SettingsView() {
           </button>
         </SettingRow>
       </SettingsSection>
+      <SettingsSection title={tr("Reading tracking")}>
+        <TrackingSettings />
+      </SettingsSection>
       {!mobile && (
         <SettingsSection title={tr("Discord")}>
           <DiscordPresenceSetting />
@@ -1298,6 +1325,272 @@ function DiscordPresenceSetting() {
         {error !== null && <span className="danger-text">{error}</span>}
       </div>
     </SettingRow>
+  );
+}
+
+const TRACKING_PROVIDERS: Array<{
+  id: TrackingProvider;
+  label: string;
+}> = [
+  { id: "aniList", label: "AniList" },
+  { id: "myAnimeList", label: "MyAnimeList" },
+];
+
+function TrackingSettings() {
+  const [accounts, setAccounts] = useState<TrackingAccount[]>([]);
+  const [busy, setBusy] = useState<TrackingProvider | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const refresh = () => {
+    void backend
+      .trackingAccounts()
+      .then(setAccounts)
+      .catch((caught) => setError(errorMessage(caught)));
+  };
+
+  useEffect(() => {
+    let active = true;
+    refresh();
+    let unlisten: (() => void) | null = null;
+    void backend
+      .onTrackingAuth((event) => {
+        if (!active) return;
+        setBusy(null);
+        if (event.success) {
+          setError(null);
+          setNotice(event.message);
+          refresh();
+        } else {
+          setNotice(null);
+          setError(event.message);
+        }
+      })
+      .then((next) => {
+        if (active) unlisten = next;
+        else next();
+      });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  const connect = async (provider: TrackingProvider) => {
+    setBusy(provider);
+    setError(null);
+    setNotice(null);
+    try {
+      await backend.beginTrackingOAuth(provider);
+      setBusy(null);
+    } catch (caught) {
+      setError(errorMessage(caught));
+      setBusy(null);
+    }
+  };
+
+  const disconnect = async (provider: TrackingProvider) => {
+    setBusy(provider);
+    setError(null);
+    try {
+      await backend.disconnectTracking(provider);
+      refresh();
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="tracking-settings">
+      {TRACKING_PROVIDERS.map(({ id, label }) => {
+        const account = accounts.find((candidate) => candidate.provider === id);
+        return (
+          <SettingRow
+            key={id}
+            label={label}
+            detail={
+              account?.connected
+                ? tr("Connected as {{name}}", {
+                    name: account.username ?? label,
+                  })
+                : account !== undefined && !account.oauthConfigured
+                  ? tr("OAuth is not configured in this build.")
+                : tr("Sync completed chapters to {{name}}.", { name: label })
+            }
+          >
+            {account?.connected ? (
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={busy === id}
+                onClick={() => void disconnect(id)}
+              >
+                {tr("Disconnect")}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={
+                  busy === id ||
+                  account === undefined ||
+                  !account.oauthConfigured
+                }
+                onClick={() => void connect(id)}
+              >
+                {busy === id ? tr("Opening…") : tr("Connect")}
+              </button>
+            )}
+          </SettingRow>
+        );
+      })}
+      {notice !== null && <span className="success-text">{notice}</span>}
+      {error !== null && <span className="danger-text">{error}</span>}
+    </div>
+  );
+}
+
+function TrackingMatcher({ item }: { item: LibraryItem }) {
+  const [accounts, setAccounts] = useState<TrackingAccount[]>([]);
+  const [mappings, setMappings] = useState<TrackingMapping[]>([]);
+  const [candidates, setCandidates] = useState<
+    Partial<Record<TrackingProvider, TrackingCandidate[]>>
+  >({});
+  const [loading, setLoading] = useState(false);
+  const [matchError, setMatchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setMatchError(null);
+    void Promise.all([
+      backend.trackingAccounts(),
+      backend.trackingMappings(item.id),
+    ])
+      .then(async ([nextAccounts, nextMappings]) => {
+        if (!active) return;
+        setAccounts(nextAccounts);
+        setMappings(nextMappings);
+        const connected = nextAccounts.filter((account) => account.connected);
+        const suggestions = await Promise.all(
+          connected
+            .filter(
+              (account) =>
+                !nextMappings.some(
+                  (mapping) => mapping.provider === account.provider,
+                ),
+            )
+            .map(async (account) => {
+              const suggestion = await backend.suggestTracking(
+                account.provider,
+                item.series ?? item.title,
+              );
+              const first = suggestion.candidates[0];
+              if (suggestion.automatic && first !== undefined) {
+                const mapping = {
+                  publicationId: item.id,
+                  provider: account.provider,
+                  mediaId: first.id,
+                  mediaTitle: first.title,
+                };
+                await backend.setTrackingMapping(mapping);
+                return { provider: account.provider, mapping, candidates: [] };
+              }
+              return {
+                provider: account.provider,
+                mapping: null,
+                candidates: suggestion.candidates,
+              };
+            }),
+        );
+        if (!active) return;
+        setMappings((current) => [
+          ...current,
+          ...suggestions.flatMap((result) =>
+            result.mapping === null ? [] : [result.mapping],
+          ),
+        ]);
+        setCandidates(
+          Object.fromEntries(
+            suggestions.map((result) => [result.provider, result.candidates]),
+          ),
+        );
+      })
+      .catch((caught) => {
+        if (active) setMatchError(errorMessage(caught));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [item.id, item.series, item.title]);
+
+  const connected = accounts.filter((account) => account.connected);
+  if (connected.length === 0) return null;
+
+  return (
+    <div className="tracking-matcher">
+      <span className="eyebrow">{tr("Reading tracking")}</span>
+      {connected.map((account) => {
+        const mapping = mappings.find(
+          (candidate) => candidate.provider === account.provider,
+        );
+        const options = candidates[account.provider] ?? [];
+        const label =
+          TRACKING_PROVIDERS.find((provider) => provider.id === account.provider)
+            ?.label ?? account.provider;
+        if (mapping !== undefined) {
+          return (
+            <div className="tracking-match" key={account.provider}>
+              <span>{label}</span>
+              <strong>{mapping.mediaTitle}</strong>
+            </div>
+          );
+        }
+        return (
+          <label className="tracking-match" key={account.provider}>
+            <span>{label}</span>
+            <select
+              value=""
+              disabled={loading || options.length === 0}
+              aria-label={tr("Match {{title}} on {{name}}", {
+                title: item.title,
+                name: label,
+              })}
+              onChange={(event) => {
+                const selected = options.find(
+                  (candidate) => candidate.id === Number(event.target.value),
+                );
+                if (selected === undefined) return;
+                const next = {
+                  publicationId: item.id,
+                  provider: account.provider,
+                  mediaId: selected.id,
+                  mediaTitle: selected.title,
+                };
+                void backend.setTrackingMapping(next).then(() => {
+                  setMappings((current) => [...current, next]);
+                });
+              }}
+            >
+              <option value="">
+                {loading ? tr("Matching…") : tr("Choose title")}
+              </option>
+              {options.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        );
+      })}
+      {matchError !== null && <span className="danger-text">{matchError}</span>}
+    </div>
   );
 }
 

@@ -20,7 +20,14 @@ use koma_core::{
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_deep_link::DeepLinkExt;
 use uuid::Uuid;
+
+mod tracking;
+
+use tracking::{
+    TrackingAccount, TrackingMapping, TrackingProvider, TrackingService, TrackingSuggestion,
+};
 
 struct AppState {
     library: Arc<Library>,
@@ -33,6 +40,7 @@ struct AppState {
     pending_open_paths: Mutex<Vec<PathBuf>>,
     default_import_directory: PathBuf,
     managed_library_directory: PathBuf,
+    tracking: Arc<TrackingService>,
     #[cfg(desktop)]
     discord: Mutex<Option<DiscordIpcClient>>,
 }
@@ -56,6 +64,15 @@ impl AppState {
             .unwrap_or_else(|| Path::new("."))
             .join("connectors");
         let connectors = load_connectors(&connectors_directory)?;
+        let tracking = Arc::new(
+            TrackingService::new(
+                database_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("tracking.json"),
+            )
+            .map_err(KomaError::Other)?,
+        );
         Ok(Self {
             library: Arc::new(Library::open(database_path)?),
             importer: Arc::new(MangaFireImporter::new()?),
@@ -67,6 +84,7 @@ impl AppState {
             pending_open_paths: Mutex::new(pending_open_paths),
             default_import_directory,
             managed_library_directory,
+            tracking,
             #[cfg(desktop)]
             discord: Mutex::new(None),
         })
@@ -304,6 +322,13 @@ struct CommandError {
     code: &'static str,
     message: String,
     recoverable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackingAuthEvent {
+    success: bool,
+    message: String,
 }
 
 impl From<KomaError> for CommandError {
@@ -882,9 +907,120 @@ fn save_progress(
     current_page: usize,
     settings: Option<ReaderSettings>,
 ) -> Result<ReadingState, CommandError> {
+    let reading_state =
+        state
+            .library
+            .save_progress(publication_id, current_page, settings.as_ref())?;
+    if let Some(chapter) = state
+        .library
+        .completed_chapter(publication_id, reading_state.current_page)?
+    {
+        let tracking = Arc::clone(&state.tracking);
+        tauri::async_runtime::spawn(async move {
+            tracking.sync_progress(publication_id, chapter).await;
+        });
+    }
+    Ok(reading_state)
+}
+
+#[tauri::command]
+fn record_reading_time(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    elapsed_seconds: u64,
+) -> Result<u64, CommandError> {
     Ok(state
         .library
-        .save_progress(publication_id, current_page, settings.as_ref())?)
+        .record_reading_time(publication_id, elapsed_seconds)?)
+}
+
+fn tracking_error(message: String) -> CommandError {
+    CommandError {
+        code: "tracking_failed",
+        message,
+        recoverable: true,
+    }
+}
+
+#[tauri::command]
+fn tracking_accounts(state: State<'_, AppState>) -> Result<Vec<TrackingAccount>, CommandError> {
+    state.tracking.accounts().map_err(tracking_error)
+}
+
+#[tauri::command]
+fn begin_tracking_oauth(
+    state: State<'_, AppState>,
+    provider: TrackingProvider,
+) -> Result<String, CommandError> {
+    state.tracking.begin_oauth(provider).map_err(tracking_error)
+}
+
+#[tauri::command]
+fn disconnect_tracking(
+    state: State<'_, AppState>,
+    provider: TrackingProvider,
+) -> Result<(), CommandError> {
+    state.tracking.disconnect(provider).map_err(tracking_error)
+}
+
+#[tauri::command]
+async fn suggest_tracking(
+    state: State<'_, AppState>,
+    provider: TrackingProvider,
+    query: String,
+) -> Result<TrackingSuggestion, CommandError> {
+    state
+        .tracking
+        .suggest(provider, &query)
+        .await
+        .map_err(tracking_error)
+}
+
+#[tauri::command]
+fn tracking_mappings(
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+) -> Result<Vec<TrackingMapping>, CommandError> {
+    state
+        .tracking
+        .mappings(publication_id)
+        .map_err(tracking_error)
+}
+
+#[tauri::command]
+fn set_tracking_mapping(
+    state: State<'_, AppState>,
+    mapping: TrackingMapping,
+) -> Result<(), CommandError> {
+    state.tracking.set_mapping(mapping).map_err(tracking_error)
+}
+
+fn handle_tracking_oauth_url(app: AppHandle, callback: String) {
+    if !callback.starts_with("koma://oauth/") {
+        return;
+    }
+    let tracking = Arc::clone(&app.state::<AppState>().tracking);
+    tauri::async_runtime::spawn(async move {
+        let event = match tracking.finish_oauth(&callback).await {
+            Ok(account) => TrackingAuthEvent {
+                success: true,
+                message: format!(
+                    "{} connected",
+                    account.username.unwrap_or_else(|| "Account".to_owned())
+                ),
+            },
+            Err(message) => TrackingAuthEvent {
+                success: false,
+                message,
+            },
+        };
+        let _ = app.emit("koma://tracking-auth", event);
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    });
 }
 
 #[tauri::command]
@@ -1368,6 +1504,19 @@ fn setup_state(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let library = Arc::clone(&state.library);
     let app_handle = app.handle().clone();
     app.manage(state);
+    #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+    app.deep_link().register_all()?;
+    let oauth_app = app.handle().clone();
+    app.deep_link().on_open_url(move |event| {
+        for url in event.urls() {
+            handle_tracking_oauth_url(oauth_app.clone(), url.to_string());
+        }
+    });
+    if let Some(urls) = app.deep_link().get_current()? {
+        for url in urls {
+            handle_tracking_oauth_url(app.handle().clone(), url.to_string());
+        }
+    }
     tauri::async_runtime::spawn(async move {
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1420,39 +1569,11 @@ fn scan_registered_folder(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::copy_into_managed_library;
-
-    #[test]
-    fn mobile_imports_are_copied_to_unique_managed_paths() {
-        let root = tempfile::tempdir().expect("temporary directory");
-        let incoming = root.path().join("Incoming");
-        let managed = root.path().join("Documents").join("Koma");
-        std::fs::create_dir_all(&incoming).expect("incoming directory");
-        let source = incoming.join("Volume.cbz");
-        std::fs::write(&source, b"comic").expect("source file");
-
-        let first = copy_into_managed_library(&source, &managed).expect("first copy");
-        let second = copy_into_managed_library(&source, &managed).expect("second copy");
-
-        assert_eq!(first, managed.join("Volume.cbz"));
-        assert_eq!(second, managed.join("Volume 2.cbz"));
-        assert_eq!(std::fs::read(first).expect("copied bytes"), b"comic");
-        assert_eq!(
-            copy_into_managed_library(&second, &managed).expect("managed source"),
-            second
-        );
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(desktop)]
     let builder = builder
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_single_instance::init(
             |app, arguments, working_directory| {
                 let paths = open_paths_from_arguments(&arguments, Path::new(&working_directory));
@@ -1463,7 +1584,12 @@ pub fn run() {
                     let _ = window.set_focus();
                 }
             },
-        ));
+        ))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+    #[cfg(not(desktop))]
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
 
     builder
         .plugin(tauri_plugin_dialog::init())
@@ -1492,6 +1618,13 @@ pub fn run() {
             open_reader,
             read_page,
             save_progress,
+            record_reading_time,
+            tracking_accounts,
+            begin_tracking_oauth,
+            disconnect_tracking,
+            suggest_tracking,
+            tracking_mappings,
+            set_tracking_mapping,
             add_bookmark,
             update_bookmark,
             remove_bookmark,
@@ -1544,4 +1677,30 @@ pub fn run() {
                 queue_open_paths(_app, paths);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_into_managed_library;
+
+    #[test]
+    fn mobile_imports_are_copied_to_unique_managed_paths() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let incoming = root.path().join("Incoming");
+        let managed = root.path().join("Documents").join("Koma");
+        std::fs::create_dir_all(&incoming).expect("incoming directory");
+        let source = incoming.join("Volume.cbz");
+        std::fs::write(&source, b"comic").expect("source file");
+
+        let first = copy_into_managed_library(&source, &managed).expect("first copy");
+        let second = copy_into_managed_library(&source, &managed).expect("second copy");
+
+        assert_eq!(first, managed.join("Volume.cbz"));
+        assert_eq!(second, managed.join("Volume 2.cbz"));
+        assert_eq!(std::fs::read(first).expect("copied bytes"), b"comic");
+        assert_eq!(
+            copy_into_managed_library(&second, &managed).expect("managed source"),
+            second
+        );
+    }
 }

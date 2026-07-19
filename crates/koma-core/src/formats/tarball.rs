@@ -70,6 +70,7 @@ impl TarPublication {
             format: PublicationFormat::Cbt,
             metadata: PublicationMetadata::inferred_from_path(path),
             pages: descriptors,
+            chapters: Vec::new(),
             fingerprint,
             modified_at: modified_at(path),
         };

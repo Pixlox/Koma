@@ -446,6 +446,23 @@
     "Zoom": "變焦",
     "Zoom in": "放大",
     "Zoom out": "縮小",
-    "Zoom presets": "縮放預設"
+    "Zoom presets": "縮放預設",
+    "Choose title": "選擇作品",
+    "Connect": "連線",
+    "Connected as {{name}}": "已以 {{name}} 身分連線",
+    "Deselect all": "取消全選",
+    "Disconnect": "中斷連線",
+    "Less than a minute": "不到一分鐘",
+    "Match {{title}} on {{name}}": "在 {{name}} 上配對 {{title}}",
+    "Matching…": "正在配對…",
+    "OAuth is not configured in this build.": "此版本尚未設定 OAuth。",
+    "Reading time": "閱讀時間",
+    "Reading tracking": "閱讀記錄同步",
+    "Select all": "全選",
+    "Sync completed chapters to {{name}}.": "將已讀章節同步到 {{name}}。",
+    "{{count}} chapters selected": "已選擇 {{count}} 章",
+    "{{count}} hr": "{{count}} 小時",
+    "{{count}} min": "{{count}} 分鐘",
+    "{{hours}} hr {{minutes}} min": "{{hours}} 小時 {{minutes}} 分鐘"
   }
 }

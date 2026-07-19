@@ -446,6 +446,23 @@
     "Zoom": "Thu phóng",
     "Zoom in": "Phóng to",
     "Zoom out": "Thu nhỏ",
-    "Zoom presets": "Cài đặt trước thu phóng"
+    "Zoom presets": "Cài đặt trước thu phóng",
+    "Choose title": "Chọn tựa truyện",
+    "Connect": "Kết nối",
+    "Connected as {{name}}": "Đã kết nối với tên {{name}}",
+    "Deselect all": "Bỏ chọn tất cả",
+    "Disconnect": "Ngắt kết nối",
+    "Less than a minute": "Dưới một phút",
+    "Match {{title}} on {{name}}": "Ghép {{title}} trên {{name}}",
+    "Matching…": "Đang tìm kết quả…",
+    "OAuth is not configured in this build.": "OAuth chưa được cấu hình trong bản dựng này.",
+    "Reading time": "Thời gian đọc",
+    "Reading tracking": "Theo dõi đọc truyện",
+    "Select all": "Chọn tất cả",
+    "Sync completed chapters to {{name}}.": "Đồng bộ các chương đã đọc xong với {{name}}.",
+    "{{count}} chapters selected": "Đã chọn {{count}} chương",
+    "{{count}} hr": "{{count}} giờ",
+    "{{count}} min": "{{count}} phút",
+    "{{hours}} hr {{minutes}} min": "{{hours}} giờ {{minutes}} phút"
   }
 }

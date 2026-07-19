@@ -43,6 +43,11 @@ targets:
         UILaunchStoryboardName: LaunchScreen
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: me.pixlox.koma.oauth
+            CFBundleURLSchemes:
+              - koma
         CFBundleDocumentTypes:
           - CFBundleTypeName: Comics and books
             CFBundleTypeRole: Viewer

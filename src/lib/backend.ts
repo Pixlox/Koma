@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import { tr } from "../i18n";
 import {
@@ -37,6 +37,11 @@ import type {
   ReaderOpenPayload,
   ReaderSettings,
   ReadingState,
+  TrackingAccount,
+  TrackingAuthEvent,
+  TrackingMapping,
+  TrackingProvider,
+  TrackingSuggestion,
 } from "../types";
 
 export interface KomaBackend {
@@ -95,6 +100,22 @@ export interface KomaBackend {
     currentPage: number,
     settings?: ReaderSettings,
   ): Promise<ReadingState>;
+  recordReadingTime(
+    publicationId: string,
+    elapsedSeconds: number,
+  ): Promise<number>;
+  trackingAccounts(): Promise<TrackingAccount[]>;
+  beginTrackingOAuth(provider: TrackingProvider): Promise<void>;
+  onTrackingAuth(
+    handler: (event: TrackingAuthEvent) => void,
+  ): Promise<UnlistenFn>;
+  disconnectTracking(provider: TrackingProvider): Promise<void>;
+  suggestTracking(
+    provider: TrackingProvider,
+    query: string,
+  ): Promise<TrackingSuggestion>;
+  trackingMappings(publicationId: string): Promise<TrackingMapping[]>;
+  setTrackingMapping(mapping: TrackingMapping): Promise<void>;
   addBookmark(
     publicationId: string,
     pageIndex: number,
@@ -499,6 +520,46 @@ class NativeBackend implements KomaBackend {
     });
   }
 
+  recordReadingTime(publicationId: string, elapsedSeconds: number) {
+    return invoke<number>("record_reading_time", {
+      publicationId,
+      elapsedSeconds,
+    });
+  }
+
+  trackingAccounts() {
+    return invoke<TrackingAccount[]>("tracking_accounts");
+  }
+
+  async beginTrackingOAuth(provider: TrackingProvider) {
+    const authorizationUrl = await invoke<string>("begin_tracking_oauth", {
+      provider,
+    });
+    await openUrl(authorizationUrl);
+  }
+
+  onTrackingAuth(handler: (event: TrackingAuthEvent) => void) {
+    return listen<TrackingAuthEvent>("koma://tracking-auth", ({ payload }) =>
+      handler(payload),
+    );
+  }
+
+  disconnectTracking(provider: TrackingProvider) {
+    return invoke<void>("disconnect_tracking", { provider });
+  }
+
+  suggestTracking(provider: TrackingProvider, query: string) {
+    return invoke<TrackingSuggestion>("suggest_tracking", { provider, query });
+  }
+
+  trackingMappings(publicationId: string) {
+    return invoke<TrackingMapping[]>("tracking_mappings", { publicationId });
+  }
+
+  setTrackingMapping(mapping: TrackingMapping) {
+    return invoke<void>("set_tracking_mapping", { mapping });
+  }
+
   addBookmark(
     publicationId: string,
     pageIndex: number,
@@ -620,6 +681,11 @@ function uuid(): string {
 class PreviewBackend implements KomaBackend {
   readonly kind = "preview" as const;
   private importHandlers = new Set<(event: ImportEvent) => void>();
+  private tracking = new Map<TrackingProvider, TrackingAccount>();
+  private mappings: TrackingMapping[] = [];
+  private trackingAuthHandlers = new Set<
+    (event: TrackingAuthEvent) => void
+  >();
 
   bootstrap() {
     return Promise.resolve(demoBootstrap());
@@ -888,8 +954,10 @@ class PreviewBackend implements KomaBackend {
     return Promise.resolve({
       publicationId,
       currentPage,
+      currentChapter: item.currentChapter,
       progress,
       completed: completed && item.pageCount > 0,
+      totalReadingSeconds: item.totalReadingSeconds,
       settings: DEFAULT_READER_SETTINGS,
       updatedAt,
     });
@@ -930,11 +998,100 @@ class PreviewBackend implements KomaBackend {
     return Promise.resolve({
       publicationId,
       currentPage: bounded,
+      currentChapter: item.currentChapter,
       progress,
       completed: progress >= 1,
+      totalReadingSeconds: item.totalReadingSeconds,
       settings,
       updatedAt,
     });
+  }
+
+  recordReadingTime(publicationId: string, elapsedSeconds: number) {
+    const item = this.item(publicationId);
+    const totalReadingSeconds =
+      item.totalReadingSeconds + Math.max(0, Math.min(120, elapsedSeconds));
+    this.update(publicationId, (candidate) => ({
+      ...candidate,
+      totalReadingSeconds,
+    }));
+    return Promise.resolve(totalReadingSeconds);
+  }
+
+  trackingAccounts() {
+    return Promise.resolve(
+      (["aniList", "myAnimeList"] as TrackingProvider[]).map(
+        (provider) =>
+          this.tracking.get(provider) ?? {
+            provider,
+            connected: false,
+            username: null,
+            oauthConfigured: true,
+          },
+      ),
+    );
+  }
+
+  beginTrackingOAuth(provider: TrackingProvider) {
+    const account = {
+      provider,
+      connected: true,
+      username: provider === "aniList" ? "KomaReader" : "koma_reader",
+      oauthConfigured: true,
+    };
+    this.tracking.set(provider, account);
+    for (const handler of this.trackingAuthHandlers) {
+      handler({ success: true, message: "Account connected" });
+    }
+    return Promise.resolve();
+  }
+
+  onTrackingAuth(handler: (event: TrackingAuthEvent) => void) {
+    this.trackingAuthHandlers.add(handler);
+    return Promise.resolve(() => this.trackingAuthHandlers.delete(handler));
+  }
+
+  disconnectTracking(provider: TrackingProvider) {
+    this.tracking.delete(provider);
+    this.mappings = this.mappings.filter(
+      (mapping) => mapping.provider !== provider,
+    );
+    return Promise.resolve();
+  }
+
+  suggestTracking(provider: TrackingProvider, query: string) {
+    return Promise.resolve({
+      provider,
+      automatic: true,
+      candidates: [
+        {
+          id: provider === "aniList" ? 30013 : 13,
+          title: query,
+          alternateTitles: [],
+          coverUrl: null,
+          chapters: null,
+          score: 1,
+        },
+      ],
+    });
+  }
+
+  trackingMappings(publicationId: string) {
+    return Promise.resolve(
+      this.mappings.filter(
+        (mapping) => mapping.publicationId === publicationId,
+      ),
+    );
+  }
+
+  setTrackingMapping(mapping: TrackingMapping) {
+    this.mappings = this.mappings.filter(
+      (candidate) =>
+        candidate.publicationId !== mapping.publicationId ||
+        candidate.provider !== mapping.provider,
+    );
+    this.mappings.push(mapping);
+    return Promise.resolve();
   }
 
   addBookmark(

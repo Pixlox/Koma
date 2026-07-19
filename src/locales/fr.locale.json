@@ -446,6 +446,23 @@
     "Zoom": "Zoomer",
     "Zoom in": "Zoomer",
     "Zoom out": "Zoom arrière",
-    "Zoom presets": "Préréglages de zoom"
+    "Zoom presets": "Préréglages de zoom",
+    "Choose title": "Choisir un titre",
+    "Connect": "Connecter",
+    "Connected as {{name}}": "Connecté en tant que {{name}}",
+    "Deselect all": "Tout désélectionner",
+    "Disconnect": "Déconnecter",
+    "Less than a minute": "Moins d’une minute",
+    "Match {{title}} on {{name}}": "Associer {{title}} sur {{name}}",
+    "Matching…": "Recherche de correspondance…",
+    "OAuth is not configured in this build.": "OAuth n’est pas configuré dans cette version.",
+    "Reading time": "Temps de lecture",
+    "Reading tracking": "Suivi de lecture",
+    "Select all": "Tout sélectionner",
+    "Sync completed chapters to {{name}}.": "Synchroniser les chapitres terminés avec {{name}}.",
+    "{{count}} chapters selected": "{{count}} chapitres sélectionnés",
+    "{{count}} hr": "{{count}} h",
+    "{{count}} min": "{{count}} min",
+    "{{hours}} hr {{minutes}} min": "{{hours}} h {{minutes}} min"
   }
 }

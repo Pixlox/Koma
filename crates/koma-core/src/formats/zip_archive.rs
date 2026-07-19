@@ -15,7 +15,8 @@ use crate::{
     },
     metadata::ComicInfo,
     model::{
-        PageData, PageDescriptor, PublicationFormat, PublicationManifest, PublicationMetadata,
+        ChapterRange, KomaArchiveMetadata, PageData, PageDescriptor, PublicationFormat,
+        PublicationManifest, PublicationMetadata,
     },
     natural_sort,
 };
@@ -44,6 +45,7 @@ impl ZipPublication {
         let mut archive = ZipArchive::new(file)?;
         let mut entries = Vec::<(String, u64)>::new();
         let mut comic_info = None;
+        let mut koma_metadata = None;
 
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
@@ -56,6 +58,11 @@ impl ZipPublication {
                 let mut source = String::new();
                 entry.read_to_string(&mut source)?;
                 comic_info = ComicInfo::from_xml(&source).ok();
+            }
+            if name.eq_ignore_ascii_case("Koma.json") && entry.size() <= 2 * 1024 * 1024 {
+                let mut source = String::new();
+                entry.read_to_string(&mut source)?;
+                koma_metadata = serde_json::from_str::<KomaArchiveMetadata>(&source).ok();
             }
             if is_image_path(&name) {
                 if entry.size() > MAX_PAGE_BYTES {
@@ -107,6 +114,9 @@ impl ZipPublication {
                 is_cover: index == 0,
             })
             .collect::<Vec<_>>();
+        let chapters = koma_metadata
+            .map(|metadata| valid_chapter_ranges(metadata.chapters, descriptors.len()))
+            .unwrap_or_default();
         let fingerprint = archive_fingerprint(path, &descriptors);
         let manifest = PublicationManifest {
             id: manifest_id(&fingerprint),
@@ -114,6 +124,7 @@ impl ZipPublication {
             format,
             metadata,
             pages: descriptors,
+            chapters,
             fingerprint,
             modified_at: modified_at(path),
         };
@@ -153,11 +164,26 @@ impl ZipPublication {
         pages: impl IntoIterator<Item = (String, PathBuf)>,
         comic_info: &ComicInfo,
     ) -> Result<()> {
+        Self::write_cbz_from_files_with_metadata(output, pages, comic_info, None)
+    }
+
+    pub fn write_cbz_from_files_with_metadata(
+        output: &Path,
+        pages: impl IntoIterator<Item = (String, PathBuf)>,
+        comic_info: &ComicInfo,
+        koma_metadata: Option<&KomaArchiveMetadata>,
+    ) -> Result<()> {
         let temporary = TemporarySibling::new(output);
         let file = File::create(temporary.path())?;
         let mut writer = ZipWriter::new(file);
         writer.start_file("ComicInfo.xml", metadata_options())?;
         writer.write_all(comic_info.to_xml()?.as_bytes())?;
+        if let Some(metadata) = koma_metadata {
+            writer.start_file("Koma.json", metadata_options())?;
+            let encoded = serde_json::to_string_pretty(metadata)
+                .map_err(|error| KomaError::Other(error.to_string()))?;
+            writer.write_all(encoded.as_bytes())?;
+        }
         for (name, path) in pages {
             ensure_safe_archive_path(&name)?;
             let metadata = std::fs::metadata(&path)?;
@@ -201,6 +227,24 @@ impl ZipPublication {
         let _verified = Self::open(temporary.path())?;
         temporary.commit(path)
     }
+}
+
+fn valid_chapter_ranges(mut chapters: Vec<ChapterRange>, page_count: usize) -> Vec<ChapterRange> {
+    chapters.sort_by_key(|chapter| chapter.start_page_index);
+    let mut previous_end = None;
+    chapters
+        .into_iter()
+        .filter(|chapter| {
+            let valid = chapter.number.is_finite()
+                && chapter.start_page_index <= chapter.end_page_index
+                && chapter.end_page_index < page_count
+                && previous_end.is_none_or(|end| chapter.start_page_index > end);
+            if valid {
+                previous_end = Some(chapter.end_page_index);
+            }
+            valid
+        })
+        .collect()
 }
 
 fn metadata_options() -> SimpleFileOptions {
@@ -389,7 +433,11 @@ mod tests {
     use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
     use super::ZipPublication;
-    use crate::{formats::PublicationReader, metadata::ComicInfo};
+    use crate::{
+        formats::PublicationReader,
+        metadata::ComicInfo,
+        model::{ChapterRange, KomaArchiveMetadata},
+    };
 
     #[test]
     fn reads_cbz_in_natural_order_and_uses_comic_info() {
@@ -466,6 +514,45 @@ mod tests {
                 .compression(),
             CompressionMethod::Deflated
         );
+    }
+
+    #[test]
+    fn preserves_chapter_page_boundaries_in_koma_metadata() {
+        let directory = tempdir().expect("temp directory");
+        let first = directory.path().join("001.png");
+        let second = directory.path().join("002.png");
+        std::fs::write(&first, tiny_png()).expect("write first page");
+        std::fs::write(&second, tiny_png()).expect("write second page");
+        let output = directory.path().join("series.cbz");
+        let chapters = vec![
+            ChapterRange {
+                id: Some("101".to_owned()),
+                number: 0.5,
+                title: Some("Prologue".to_owned()),
+                start_page_index: 0,
+                end_page_index: 0,
+            },
+            ChapterRange {
+                id: Some("102".to_owned()),
+                number: 1.0,
+                title: None,
+                start_page_index: 1,
+                end_page_index: 1,
+            },
+        ];
+        ZipPublication::write_cbz_from_files_with_metadata(
+            &output,
+            [
+                ("001.png".to_owned(), first),
+                ("002.png".to_owned(), second),
+            ],
+            &ComicInfo::default(),
+            Some(&KomaArchiveMetadata::new(chapters.clone())),
+        )
+        .expect("write series archive");
+
+        let publication = ZipPublication::open(&output).expect("open series archive");
+        assert_eq!(publication.manifest().chapters, chapters);
     }
 
     fn tiny_png() -> &'static [u8] {

@@ -71,6 +71,7 @@ impl SevenZipPublication {
             format: PublicationFormat::Cb7,
             metadata: PublicationMetadata::inferred_from_path(path),
             pages: descriptors,
+            chapters: Vec::new(),
             fingerprint,
             modified_at: modified_at(path),
         };

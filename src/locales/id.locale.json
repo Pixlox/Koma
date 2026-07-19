@@ -446,6 +446,23 @@
     "Zoom": "Perbesar",
     "Zoom in": "Perbesar",
     "Zoom out": "Perkecil",
-    "Zoom presets": "Preset zoom"
+    "Zoom presets": "Preset zoom",
+    "Choose title": "Pilih judul",
+    "Connect": "Hubungkan",
+    "Connected as {{name}}": "Terhubung sebagai {{name}}",
+    "Deselect all": "Batalkan semua pilihan",
+    "Disconnect": "Putuskan",
+    "Less than a minute": "Kurang dari satu menit",
+    "Match {{title}} on {{name}}": "Cocokkan {{title}} di {{name}}",
+    "Matching…": "Mencocokkan…",
+    "OAuth is not configured in this build.": "OAuth belum dikonfigurasi dalam build ini.",
+    "Reading time": "Waktu membaca",
+    "Reading tracking": "Pelacakan bacaan",
+    "Select all": "Pilih semua",
+    "Sync completed chapters to {{name}}.": "Sinkronkan bab yang selesai ke {{name}}.",
+    "{{count}} chapters selected": "{{count}} bab dipilih",
+    "{{count}} hr": "{{count}} jam",
+    "{{count}} min": "{{count}} menit",
+    "{{hours}} hr {{minutes}} min": "{{hours}} jam {{minutes}} menit"
   }
 }

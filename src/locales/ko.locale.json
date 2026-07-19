@@ -446,6 +446,23 @@
     "Zoom": "줌",
     "Zoom in": "확대",
     "Zoom out": "축소",
-    "Zoom presets": "줌 사전 설정"
+    "Zoom presets": "줌 사전 설정",
+    "Choose title": "작품 선택",
+    "Connect": "연결",
+    "Connected as {{name}}": "{{name}}(으)로 연결됨",
+    "Deselect all": "모두 선택 해제",
+    "Disconnect": "연결 해제",
+    "Less than a minute": "1분 미만",
+    "Match {{title}} on {{name}}": "{{name}}에서 {{title}} 연결",
+    "Matching…": "일치 항목 찾는 중…",
+    "OAuth is not configured in this build.": "이 빌드에는 OAuth가 설정되어 있지 않습니다.",
+    "Reading time": "독서 시간",
+    "Reading tracking": "독서 기록 연동",
+    "Select all": "모두 선택",
+    "Sync completed chapters to {{name}}.": "완독한 챕터를 {{name}}에 동기화합니다.",
+    "{{count}} chapters selected": "{{count}}개 챕터 선택됨",
+    "{{count}} hr": "{{count}}시간",
+    "{{count}} min": "{{count}}분",
+    "{{hours}} hr {{minutes}} min": "{{hours}}시간 {{minutes}}분"
   }
 }

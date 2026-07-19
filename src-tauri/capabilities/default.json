@@ -8,6 +8,7 @@
     "core:window:allow-set-fullscreen",
     "dialog:allow-open",
     "dialog:allow-save",
+    "opener:allow-open-url",
     "opener:allow-reveal-item-in-dir"
   ]
 }

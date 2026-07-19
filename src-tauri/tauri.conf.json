@@ -142,6 +142,21 @@
     ]
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "koma"
+        ]
+      },
+      "mobile": [
+        {
+          "scheme": [
+            "koma"
+          ],
+          "appLink": false
+        }
+      ]
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhBNzVGN0JBNUU3RUI2NDcKUldSSHRuNWV1dmQxaWoxNFQ4VHl2akpMZlRqcWVVNU9GbTlnSVk0MHY5cnRVeDVrWjhtZENJQlYK",
       "endpoints": [

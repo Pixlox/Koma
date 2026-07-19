@@ -446,6 +446,23 @@
     "Zoom": "Увеличить",
     "Zoom in": "Увеличить масштаб",
     "Zoom out": "Уменьшить масштаб",
-    "Zoom presets": "Пресеты масштабирования"
+    "Zoom presets": "Пресеты масштабирования",
+    "Choose title": "Выбрать произведение",
+    "Connect": "Подключить",
+    "Connected as {{name}}": "Подключено как {{name}}",
+    "Deselect all": "Снять выделение",
+    "Disconnect": "Отключить",
+    "Less than a minute": "Меньше минуты",
+    "Match {{title}} on {{name}}": "Сопоставить {{title}} в {{name}}",
+    "Matching…": "Поиск совпадения…",
+    "OAuth is not configured in this build.": "OAuth не настроен в этой сборке.",
+    "Reading time": "Время чтения",
+    "Reading tracking": "Отслеживание чтения",
+    "Select all": "Выбрать всё",
+    "Sync completed chapters to {{name}}.": "Синхронизировать прочитанные главы с {{name}}.",
+    "{{count}} chapters selected": "Выбрано глав: {{count}}",
+    "{{count}} hr": "{{count}} ч",
+    "{{count}} min": "{{count}} мин",
+    "{{hours}} hr {{minutes}} min": "{{hours}} ч {{minutes}} мин"
   }
 }
