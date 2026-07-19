@@ -12,7 +12,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { locale, tr } from "../i18n";
-import { backend, errorCode, errorMessage } from "../lib/backend";
+import {
+  backend,
+  errorCode,
+  errorMessage,
+  localizeMessage,
+} from "../lib/backend";
 import { useKomaStore } from "../store/koma";
 import type { ImportEvent, ImportPreview } from "../types";
 
@@ -358,8 +363,11 @@ export function ImportPanel() {
             <div>
               <strong>{tr("Properly released works only.")}</strong>
               <p>
-                {bootstrap?.importWarning ??
-                  tr("Only import work you own or have permission to download.")}
+                {localizeMessage(
+                  bootstrap?.importWarning ??
+                    "Only import properly released works that you own or have permission to download.",
+                  "Only import properly released works that you own or have permission to download.",
+                )}
               </p>
             </div>
           </div>

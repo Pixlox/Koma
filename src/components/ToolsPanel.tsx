@@ -70,7 +70,7 @@ export function ToolsPanel() {
         } catch (caught) {
           if (errorCode(caught) !== "password_required") throw caught;
           const entered = await requestPassword(item.title);
-          if (entered === null) throw new Error(tr("Inspection cancelled"));
+          if (entered === null) throw new Error("Inspection cancelled");
           password = entered;
         }
       }
@@ -368,7 +368,7 @@ function InspectionRow({ issue }: { issue: InspectionIssue }) {
       <Icon size={16} />
       <div>
         <strong>{issueTitle(issue)}</strong>
-        <p>{issue.message}</p>
+        <p>{issueDescription(issue)}</p>
       </div>
       {issue.pageIndex !== null && (
         <span>{tr("Page {{page}}", { page: issue.pageIndex + 1 })}</span>
@@ -737,4 +737,19 @@ function issueTitle(issue: InspectionIssue): string {
     pdfManifestOnly: "PDF structure verified",
   };
   return tr(labels[issue.code]);
+}
+
+function issueDescription(issue: InspectionIssue): string {
+  const descriptions: Record<InspectionIssue["code"], string> = {
+    metadataIncomplete: "Only basic title metadata is available.",
+    duplicateContent: "Duplicate pages were detected.",
+    extensionMismatch: "The filename extension does not match the image data.",
+    unreadablePage: "This page could not be read.",
+    veryLargePage:
+      "This page is larger than 64 MiB and may open slowly on mobile devices.",
+    widePages: "Wide pages can use Koma's split or rotate setting.",
+    pdfManifestOnly:
+      "The PDF structure and page tree are valid. Pages render on demand.",
+  };
+  return tr(descriptions[issue.code]);
 }

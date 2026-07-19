@@ -47,7 +47,7 @@ import {
   locale,
   tr,
 } from "../i18n";
-import { backend, errorMessage } from "../lib/backend";
+import { backend, errorMessage, localizeMessage } from "../lib/backend";
 import {
   checkForUpdate,
   restartAfterUpdate,
@@ -1338,6 +1338,24 @@ const TRACKING_PROVIDERS: Array<{
   { id: "myAnimeList", label: "MyAnimeList" },
 ];
 
+function trackingStatus(status: string | null | undefined): string | null {
+  if (status === null || status === undefined) return null;
+  const key = status.toLocaleLowerCase().replaceAll("_", "");
+  const labels: Record<string, string> = {
+    current: "Reading",
+    reading: "Reading",
+    completed: "Completed",
+    paused: "On hold",
+    onhold: "On hold",
+    dropped: "Dropped",
+    planning: "Plan to read",
+    plantoread: "Plan to read",
+    repeating: "Rereading",
+    rereading: "Rereading",
+  };
+  return tr(labels[key] ?? "Unknown");
+}
+
 function TrackingSettings() {
   const [accounts, setAccounts] = useState<TrackingAccount[]>([]);
   const [busy, setBusy] = useState<TrackingProvider | null>(null);
@@ -1360,11 +1378,16 @@ function TrackingSettings() {
       setBusy(null);
       if (event.success) {
         setError(null);
-        setNotice(event.message);
+        setNotice(tr("Account connected"));
         refresh();
       } else {
         setNotice(null);
-        setError(event.message);
+        setError(
+          localizeMessage(
+            event.message,
+            "Account connection could not be completed.",
+          ),
+        );
       }
     };
     void backend
@@ -1603,16 +1626,7 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
             candidate.mediaId === mapping?.mediaId,
         );
         if (mapping !== undefined && editing !== account.provider) {
-          const status =
-            progress?.status === "CURRENT" || progress?.status === "reading"
-              ? tr("Reading")
-              : progress?.status === "COMPLETED" ||
-                  progress?.status === "completed"
-                ? tr("Completed")
-                : progress?.status
-                    ?.toLowerCase()
-                    .replaceAll("_", " ")
-                    .replace(/^\w/, (letter) => letter.toUpperCase());
+          const status = trackingStatus(progress?.status);
           return (
             <div className="tracking-match" key={account.provider}>
               <span>{label}</span>
@@ -1871,10 +1885,14 @@ function ManagedFolderRow({
       <div className="managed-folder-copy">
         <strong title={folder.path}>{folder.path}</strong>
         <span>
-          {folder.lastError ??
-            tr("Last scan: {{date}}", {
-              date: lastScan,
-            })}
+          {folder.lastError === null
+            ? tr("Last scan: {{date}}", {
+                date: lastScan,
+              })
+            : localizeMessage(
+                folder.lastError,
+                "The last folder scan could not be completed.",
+              )}
         </span>
       </div>
       <label className="setting-select compact">
@@ -1945,7 +1963,7 @@ function UpdateSetting() {
       setAvailable(result);
       setPhase(result === null ? "current" : "available");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(errorMessage(caught));
       setPhase("error");
     }
   };
@@ -1968,7 +1986,7 @@ function UpdateSetting() {
       });
       setPhase("ready");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(errorMessage(caught));
       setPhase("error");
     }
   };

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 
 function sourceFiles(directory) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -27,17 +28,125 @@ const catalogues = {
   es: catalogueKeys(i18nSource, "  es: {", "\n} as const"),
 };
 const staticKeys = new Set();
+const sourceErrors = [];
+const allowedRawInterfaceText = new Set([
+  "Koma",
+  "GitHub",
+  "esc",
+  "https://…",
+  "en, ja, fr…",
+]);
+
+function addStringLiterals(node) {
+  if (
+    ts.isStringLiteral(node) ||
+    ts.isNoSubstitutionTemplateLiteral(node)
+  ) {
+    staticKeys.add(node.text);
+    return;
+  }
+  if (ts.isParenthesizedExpression(node)) {
+    addStringLiterals(node.expression);
+  } else if (ts.isConditionalExpression(node)) {
+    addStringLiterals(node.whenTrue);
+    addStringLiterals(node.whenFalse);
+  } else if (
+    ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+  ) {
+    addStringLiterals(node.left);
+    addStringLiterals(node.right);
+  }
+}
+
+function sourceLocation(sourceFile, node) {
+  const position = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+  return `${sourceFile.fileName}:${position.line + 1}`;
+}
+
+function checkRawInterfaceText(sourceFile, node, value) {
+  const text = value.trim().replace(/\s+/g, " ");
+  if (
+    text.length > 0 &&
+    /[A-Za-z]/.test(text) &&
+    !allowedRawInterfaceText.has(text) &&
+    !/^[A-Z]$/.test(text) &&
+    !/^\d+ px$/.test(text) &&
+    !/^github\.com\//.test(text)
+  ) {
+    sourceErrors.push(
+      `${sourceLocation(sourceFile, node)} has untranslated interface text: ${text}`,
+    );
+  }
+}
 
 for (const file of sourceFiles("src")) {
   if (file === "src/i18n.ts") continue;
   const source = fs.readFileSync(file, "utf8");
-  for (const match of source.matchAll(/\btr\(\s*("(?:[^"\\]|\\.)*")/g)) {
-    staticKeys.add(JSON.parse(match[1]));
+  const sourceFile = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const name = node.expression.text;
+      if (name === "tr" || name === "setBusy") {
+        if (node.arguments[0] !== undefined) addStringLiterals(node.arguments[0]);
+      } else if (name === "localizeMessage") {
+        if (node.arguments[1] !== undefined) addStringLiterals(node.arguments[1]);
+      }
+    }
+
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "ERROR_TRANSLATION_KEYS" &&
+      node.initializer !== undefined &&
+      ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      for (const property of node.initializer.properties) {
+        if (ts.isPropertyAssignment(property)) {
+          addStringLiterals(property.initializer);
+        }
+      }
+    }
+
+    if (
+      file.startsWith(`src${path.sep}components${path.sep}`) &&
+      ts.isPropertyAssignment(node) &&
+      ((ts.isIdentifier(node.name) && node.name.text === "label") ||
+        (ts.isStringLiteral(node.name) && node.name.text === "label")) &&
+      (ts.isStringLiteral(node.initializer) ||
+        ts.isNoSubstitutionTemplateLiteral(node.initializer)) &&
+      node.initializer.text.length > 0 &&
+      !["AniList", "MyAnimeList"].includes(node.initializer.text)
+    ) {
+      staticKeys.add(node.initializer.text);
+    }
+
+    if (ts.isJsxText(node)) {
+      checkRawInterfaceText(sourceFile, node, node.text);
+    } else if (
+      ts.isJsxAttribute(node) &&
+      ["aria-label", "placeholder", "title"].includes(node.name.text) &&
+      node.initializer !== undefined &&
+      ts.isStringLiteral(node.initializer)
+    ) {
+      checkRawInterfaceText(sourceFile, node, node.initializer.text);
+    }
+
+    ts.forEachChild(node, visit);
   }
+
+  visit(sourceFile);
 }
 
 const reference = catalogues.ja;
-const errors = [];
+const errors = [...sourceErrors];
 const localeCodes = new Set(["en", "ja", "es"]);
 
 function placeholders(value) {
@@ -48,6 +157,10 @@ function placeholders(value) {
 
 function checkPlaceholders(language, entries) {
   for (const [key, value] of entries) {
+    if (value.trim().length === 0) {
+      errors.push(`${language} has an empty translation for: ${key}`);
+      continue;
+    }
     const expected = placeholders(key);
     const actual = placeholders(value);
     if (JSON.stringify(expected) !== JSON.stringify(actual)) {

@@ -4,7 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
-import { tr } from "../i18n";
+import { locale, tr } from "../i18n";
 import {
   DEFAULT_READER_SETTINGS,
   demoBootstrap,
@@ -1453,7 +1453,22 @@ export const backend: KomaBackend = isNativeKoma()
   ? new NativeBackend()
   : new PreviewBackend();
 
-export function errorMessage(error: unknown): string {
+const ERROR_TRANSLATION_KEYS: Record<string, string> = {
+  import_denied: "This import is not permitted.",
+  provider_unavailable: "The import provider is unavailable.",
+  provider_changed: "The source returned an unexpected response.",
+  password_required: "This publication requires a password.",
+  missing_source: "The source file could not be found.",
+  unsupported_format: "This file format is not supported.",
+  empty_publication: "This publication contains no readable pages.",
+  page_out_of_range: "This page is not available.",
+  unsafe_publication: "This publication did not pass its safety checks.",
+  cancelled: "The operation was cancelled.",
+  tracking_failed: "Reading tracking could not be completed.",
+  operation_failed: "The operation could not be completed.",
+};
+
+function rawErrorMessage(error: unknown): string {
   if (
     typeof error === "object" &&
     error !== null &&
@@ -1463,6 +1478,25 @@ export function errorMessage(error: unknown): string {
     return error.message;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+export function localizeMessage(message: string, fallbackKey: string): string {
+  const translated = tr(message);
+  if (locale().toLocaleLowerCase().startsWith("en") || translated !== message) {
+    return translated;
+  }
+  return tr(fallbackKey);
+}
+
+export function errorMessage(error: unknown): string {
+  const raw = rawErrorMessage(error);
+  const key = errorCode(error);
+  if (key !== null && ERROR_TRANSLATION_KEYS[key] !== undefined) {
+    return locale().toLocaleLowerCase().startsWith("en")
+      ? raw
+      : tr(ERROR_TRANSLATION_KEYS[key]);
+  }
+  return localizeMessage(raw, "The operation could not be completed.");
 }
 
 export function errorCode(error: unknown): string | null {
