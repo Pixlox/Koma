@@ -55,9 +55,10 @@ cat "$TAURI_LOG"
 
 # Tauri normally supplies build options over a local RPC connection. That
 # connection is absent when someone opens the generated project and presses
-# Build directly in Xcode. Preserve genuine Tauri errors, but make this common
-# standalone workflow compile the same static library locally.
-if ! grep -q "failed to read CLI options" "$TAURI_LOG"; then
+# Build directly in Xcode. Tauri 2 has reported this both as a missing CLI
+# options error and, in newer releases, as a missing server address file.
+# Preserve genuine Tauri errors while supporting the standalone Xcode workflow.
+if ! grep -Eq "failed to read CLI options|failed to read missing addr file|server-addr: No such file or directory" "$TAURI_LOG"; then
   exit "$TAURI_STATUS"
 fi
 

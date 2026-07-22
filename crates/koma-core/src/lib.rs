@@ -14,11 +14,12 @@ pub use formats::{PublicationReader, open_publication};
 pub use importer::{
     ConnectorCapability, ConnectorKind, ConnectorManifest, ConnectorSummary, DeclarativeImporter,
     ImportChapter, ImportEvent, ImportOptions, ImportPreview, ImportScope, ImportVolume,
-    LinkImporter, MangaFireImporter, bundled_mangafire_summary,
+    LinkImporter, MangaFireImporter, RemoteChapter, RemoteNavigationItem, RemotePage,
+    RemotePublication, bundled_mangafire_summary, fetch_remote_page,
 };
 pub use library::{
     BackupRestoreReport, Library, LibraryBackup, LibraryFolder, LibraryScanFailure,
-    LibraryScanReport, StoredMetadata,
+    LibraryScanReport, StoredMetadata, StoredOnlineSource,
 };
 pub use metadata::ComicInfo;
 pub use model::*;

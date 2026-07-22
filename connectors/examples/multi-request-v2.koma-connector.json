@@ -1,0 +1,24 @@
+{
+  "$schema": "../connector.schema.json",
+  "schemaVersion": 2,
+  "id": "example-paginated-reader",
+  "name": "Example Paginated Reader",
+  "version": "1.0.0",
+  "description": "Demonstrates guarded HTTP pagination from Rhai.",
+  "sourcePattern": "^https://reader\\.example/series/(?P<slug>[a-z0-9-]+)$",
+  "requestUrl": "https://api.reader.example/series/$slug",
+  "allowedRequestHosts": ["api.reader.example"],
+  "allowedPageHosts": ["images.reader.example"],
+  "capabilities": ["chapter", "volume", "series"],
+  "responseType": "json",
+  "mapping": {
+    "title": "/title",
+    "language": "/language",
+    "chapters": "/chapters",
+    "chapterNumber": "/number",
+    "chapterVolume": "/volume",
+    "chapterPages": "/pages",
+    "pageUrl": "/url"
+  },
+  "transformScript": "let chapters = [];\nlet page = 1;\nloop {\n  let result = http(\"GET\", `https://api.reader.example/series/${captures.slug}/chapters?page=${page}`, #{ \"Accept\": \"application/json\" }, \"\");\n  if result.status != 200 { throw `HTTP ${result.status}`; }\n  for chapter in result.json.chapters { chapters.push(chapter); }\n  if !result.json.has_more { break; }\n  page += 1;\n}\n#{ title: response.title, language: response.language, chapters: chapters }"
+}

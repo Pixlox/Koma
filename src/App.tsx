@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { AppShell } from "./components/AppShell";
 import { CommandPalette } from "./components/CommandPalette";
+import { DownloadTray } from "./components/DownloadTray";
 import { ImportPanel } from "./components/ImportPanel";
 import { PasswordDialog } from "./components/PasswordDialog";
 import { Reader } from "./components/Reader";
@@ -27,7 +28,9 @@ export default function App() {
   const setDropActive = useKomaStore((state) => state.setDropActive);
   const importPaths = useKomaStore((state) => state.importPaths);
   const reloadLibrary = useKomaStore((state) => state.reloadLibrary);
-  const reloadLibraryFolders = useKomaStore((state) => state.reloadLibraryFolders);
+  const reloadLibraryFolders = useKomaStore(
+    (state) => state.reloadLibraryFolders,
+  );
   const language = useKomaStore((state) => state.language);
   const platform = useKomaStore((state) => state.bootstrap?.platform);
   const route = useKomaStore((state) => state.route);
@@ -63,7 +66,11 @@ export default function App() {
       ) {
         event.preventDefault();
         document.querySelector<HTMLInputElement>("[data-koma-search]")?.focus();
-      } else if (command && event.shiftKey && event.key.toLocaleLowerCase() === "i") {
+      } else if (
+        command &&
+        event.shiftKey &&
+        event.key.toLocaleLowerCase() === "i"
+      ) {
         event.preventDefault();
         setImportOpen(true);
       }
@@ -180,6 +187,7 @@ export default function App() {
       <PasswordDialog />
       <ToolsPanel />
       <Reader />
+      <DownloadTray />
       <Toasts />
       {dropActive && (
         <div className="drop-overlay" role="status" aria-live="polite">

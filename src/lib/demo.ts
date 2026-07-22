@@ -326,6 +326,42 @@ export function demoOpenPayload(item: LibraryItem): ReaderOpenPayload {
     manifest,
     readingState,
     bookmarks,
+    onlineSource:
+      item.format === "online"
+        ? {
+            provider: "MangaFire",
+            sourceUrl: "https://mangafire.to/title/preview-koma",
+            eligibilityUrl: "https://mangafire.to/title/preview-koma",
+            eligibilityStatus: 200,
+            title: item.title,
+            language: "en",
+            scope: "chapter" as const,
+            volumeId: null,
+            chapterId: 102,
+            selectedChapterIds: [],
+            chapters: [
+              {
+                id: "102",
+                number: 2,
+                title: "The crossing",
+                volume: null,
+                pages: Array.from({ length: item.pageCount }, (_, index) => ({
+                  url: `https://l1n.mfcdn2.xyz/preview-${index + 1}.jpg`,
+                  width: 1200,
+                  height: 1800,
+                })),
+              },
+            ],
+            chapterCatalog: [
+              { id: 101, number: 1, title: "Arrival", language: "en" },
+              { id: 102, number: 2, title: "The crossing", language: "en" },
+              { id: 103, number: 3, title: "Afterward", language: "en" },
+            ],
+            volumeCatalog: [],
+            allowedPageHosts: ["l1n.mfcdn2.xyz"],
+            allowLocalNetwork: false,
+          }
+        : null,
   };
 }
 

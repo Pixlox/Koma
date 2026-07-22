@@ -5,13 +5,11 @@ export type PublicationFormat =
   | "cbt"
   | "folder"
   | "pdf"
-  | "fixedLayoutEpub";
+  | "fixedLayoutEpub"
+  | "online";
 
 export type ReadingDirection =
-  | "automatic"
-  | "leftToRight"
-  | "rightToLeft"
-  | "vertical";
+  "automatic" | "leftToRight" | "rightToLeft" | "vertical";
 
 export type ReaderMode =
   | "singlePage"
@@ -136,6 +134,51 @@ export interface ReaderOpenPayload {
   manifest: PublicationManifest;
   readingState: ReadingState | null;
   bookmarks: Bookmark[];
+  onlineSource?: RemotePublication | null;
+}
+
+export interface RemotePage {
+  url: string;
+  width: number | null;
+  height: number | null;
+}
+
+export interface RemoteChapter {
+  id: string | null;
+  number: number;
+  title: string | null;
+  volume: number | null;
+  pages: RemotePage[];
+}
+
+export interface RemoteNavigationItem {
+  id: number;
+  number: number;
+  title: string | null;
+  language: string;
+}
+
+export interface RemotePublication {
+  provider: string;
+  sourceUrl: string;
+  eligibilityUrl: string;
+  eligibilityStatus: number;
+  title: string;
+  language: string | null;
+  scope: "chapter" | "volume" | "series";
+  volumeId: number | null;
+  chapterId: number | null;
+  selectedChapterIds: number[];
+  chapters: RemoteChapter[];
+  chapterCatalog: RemoteNavigationItem[];
+  volumeCatalog: RemoteNavigationItem[];
+  allowedPageHosts: string[];
+  allowLocalNetwork: boolean;
+}
+
+export interface OnlineNavigationResult {
+  item: LibraryItem;
+  reader: ReaderOpenPayload;
 }
 
 export interface PagePayload {
@@ -275,6 +318,7 @@ export interface BackupRestoreReport {
   bookmarks: number;
   importReceipts: number;
   metadataOverrides: number;
+  onlineSources: number;
   missingSources: number;
 }
 
@@ -399,6 +443,11 @@ export type ImportEvent =
   | { kind: "packaging"; outputPath: string }
   | { kind: "completed"; receipt: ImportReceipt };
 
+export interface ImportEventPayload {
+  jobId: string;
+  event: ImportEvent;
+}
+
 export interface CommandError {
   code: string;
   message: string;
@@ -406,20 +455,11 @@ export interface CommandError {
 }
 
 export type LibraryRoute =
-  | "home"
-  | "library"
-  | "continue"
-  | "favorites"
-  | "hidden"
-  | "settings";
+  "home" | "library" | "continue" | "favorites" | "hidden" | "settings";
 
 export type LibraryViewMode = "grid" | "list";
 export type LibrarySortMode =
-  | "recent"
-  | "title"
-  | "series"
-  | "added"
-  | "progress";
+  "recent" | "title" | "series" | "added" | "progress";
 export type ThemeMode = "system" | "light" | "dark";
 export type LanguageMode = string;
 export type MotionMode = "system" | "on" | "off";

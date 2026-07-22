@@ -154,7 +154,7 @@ When the first response contains chapters but not their pages, declare
 Each `{/pointer}` placeholder reads from the current chapter object. Staged page
 responses must be JSON. Their request hosts use `allowedRequestHosts`.
 
-## Rhai transforms
+## Rhai runtime
 
 Add `transformScript` when the response cannot be mapped directly. Koma runs
 the script after the declared `requestUrl` succeeds and before JSON-pointer
@@ -166,6 +166,7 @@ Available variables:
   body as a UTF-8 string.
 - `source`: the original pasted link.
 - `captures`: a map containing named `sourcePattern` captures.
+- `settings`: string values from the optional manifest `settings` object.
 
 The final expression must return a value matching your `mapping`. A convenient
 normalized shape is:
@@ -216,7 +217,52 @@ not accepted without a transform.
 - `html_select(html, selector, attribute)` → selected attribute values.
   Pass `""` as the attribute to collect element text.
 
-No other Koma APIs are exposed to Rhai.
+- `http(method, url, headers, body)` → response map containing `status`,
+  `headers`, `body`, and `json`. `headers` is a Rhai map and `body` is a string.
+
+`http` supports any valid HTTP method, so a connector can paginate, submit a
+form or JSON body, carry cookies explicitly through the `Cookie` header, and
+branch on status or response content. Koma permits at most 64 script requests
+per resolution. Every URL must match `allowedRequestHosts`; HTTPS, DNS, private
+network, redirect, timeout, and 32 MiB response limits are enforced by Koma.
+
+Example pagination:
+
+```rhai
+let chapters = [];
+let page = 1;
+loop {
+    let result = http(
+        "GET",
+        `https://api.reader.example/series/${captures.slug}?page=${page}`,
+        #{ "Accept": "application/json" },
+        ""
+    );
+    if result.status != 200 { throw `HTTP ${result.status}`; }
+    for chapter in result.json.chapters { chapters.push(chapter); }
+    if !result.json.has_more { break; }
+    page += 1;
+}
+#{ title: response.title, language: "en", chapters }
+```
+
+No other Koma APIs are exposed to Rhai. There is no file, process, environment,
+database, dynamic module, `eval`, or raw-socket API. Rhai connectors still run
+code: only install files you trust.
+
+## Online reading
+
+Connectors do not need separate online-reader code. The normalized chapter and
+page result powers both actions in Koma. **Read online** streams the selected
+chapter, volume, or series through the guarded page client. **Download** uses
+the same selection and order to build a CBZ. Chapter ranges are preserved for
+navigation and AniList/MyAnimeList progress.
+
+## Compatibility
+
+New connectors should use schema v2. Schema v1 remains loadable. Existing v2
+files that only use `transformScript` continue to work without changes; the
+guarded `http` helper is additive.
 
 ### Script limits
 

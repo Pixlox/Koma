@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    net::ToSocketAddrs,
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -16,7 +17,7 @@ use reqwest::{
     Client,
     header::{ACCEPT, CONTENT_TYPE, REFERER},
 };
-use rhai::{Array, Dynamic, Engine, Scope};
+use rhai::{Array, Dynamic, Engine, EvalAltResult, Map, Scope};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,8 +29,9 @@ use uuid::Uuid;
 use super::{
     ADAPTER_VERSION, ImportChapter, ImportEvent, ImportOptions, ImportPreview, ImportScope,
     ImportVolume, LinkImporter, MAX_IMPORT_BYTES, MAX_IMPORT_PAGE_BYTES, MAX_JSON_BYTES,
-    choose_output_path, client_builder, emit, hash_file, is_non_public_ip, page_extension,
-    read_bounded, require_success, sanitize_file_component, volume_number_label,
+    RemoteChapter, RemoteNavigationItem, RemotePage, RemotePublication, choose_output_path,
+    client_builder, emit, hash_file, is_non_public_ip, page_extension, read_bounded,
+    require_success, sanitize_file_component, volume_number_label,
 };
 use crate::{
     error::{KomaError, Result},
@@ -79,6 +81,8 @@ pub struct ConnectorManifest {
     pub mapping: ConnectorMapping,
     #[serde(default)]
     pub transform_script: Option<String>,
+    #[serde(default)]
+    pub settings: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +183,16 @@ impl ConnectorManifest {
                 ));
             }
             validate_script(script)?;
+        }
+        if self.settings.len() > 64
+            || self
+                .settings
+                .iter()
+                .any(|(key, value)| key.is_empty() || key.len() > 80 || value.len() > 4096)
+        {
+            return Err(KomaError::ImportDenied(
+                "connector settings exceed the key or value limits".to_owned(),
+            ));
         }
         if self.id.len() < 3
             || self.id.len() > 64
@@ -466,9 +480,16 @@ impl DeclarativeImporter {
         };
         let captures = self.source_captures(source)?;
         let source = source.trim().to_owned();
-        tokio::task::spawn_blocking(move || run_transform(&script, value, &source, captures))
-            .await
-            .map_err(|error| KomaError::Other(format!("connector script task failed: {error}")))?
+        let policy = ScriptNetworkPolicy {
+            allowed_hosts: self.manifest.allowed_request_hosts.clone(),
+            allow_local_network: self.manifest.allow_local_network,
+        };
+        let settings = self.manifest.settings.clone();
+        tokio::task::spawn_blocking(move || {
+            run_transform_with_network(&script, value, &source, captures, settings, Some(policy))
+        })
+        .await
+        .map_err(|error| KomaError::Other(format!("connector script task failed: {error}")))?
     }
 
     async fn hydrate_pages(&self, feed: &mut MappedFeed) -> Result<()> {
@@ -626,6 +647,98 @@ impl LinkImporter for DeclarativeImporter {
                     ConnectorCapability::Series => ImportScope::Series,
                 })
                 .collect(),
+        })
+    }
+
+    async fn resolve_online(
+        &self,
+        source: &str,
+        options: &ImportOptions,
+    ) -> Result<RemotePublication> {
+        let (feed, request_url, status) = self.fetch_feed(source).await?;
+        let title = feed.title.clone();
+        let language = Some(feed.language.clone());
+        let chapter_summaries = feed.chapter_summaries();
+        let volume_summaries = feed.volumes();
+        let active_chapter_id = (options.scope == ImportScope::Chapter)
+            .then(|| {
+                options
+                    .chapter_id
+                    .or_else(|| chapter_summaries.last().map(|chapter| chapter.id))
+            })
+            .flatten();
+        let active_volume_id = (options.scope == ImportScope::Volume)
+            .then(|| {
+                options
+                    .volume_id
+                    .or_else(|| volume_summaries.first().map(|volume| volume.id))
+            })
+            .flatten();
+        let chapters = feed
+            .selected_chapters(options)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, chapter)| RemoteChapter {
+                id: Some((index + 1).to_string()),
+                number: chapter.number,
+                title: None,
+                volume: chapter.volume,
+                pages: chapter
+                    .pages
+                    .into_iter()
+                    .map(|page| RemotePage {
+                        url: page.url,
+                        width: page.width,
+                        height: page.height,
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        if chapters.is_empty() || chapters.iter().all(|chapter| chapter.pages.is_empty()) {
+            return Err(KomaError::ProviderChanged(
+                "connector returned no pages for the selected scope".to_owned(),
+            ));
+        }
+        Ok(RemotePublication {
+            provider: self.provider().to_owned(),
+            source_url: source.trim().to_owned(),
+            eligibility_url: request_url.to_string(),
+            eligibility_status: status,
+            title,
+            language,
+            scope: options.scope,
+            volume_id: active_volume_id,
+            chapter_id: active_chapter_id,
+            selected_chapter_ids: options.selected_chapter_ids.clone(),
+            chapters,
+            chapter_catalog: if options.scope == ImportScope::Chapter {
+                chapter_summaries
+                    .into_iter()
+                    .map(|chapter| RemoteNavigationItem {
+                        id: chapter.id,
+                        number: chapter.number,
+                        title: chapter.name,
+                        language: chapter.language,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            volume_catalog: if options.scope == ImportScope::Volume {
+                volume_summaries
+                    .into_iter()
+                    .map(|volume| RemoteNavigationItem {
+                        id: volume.id,
+                        number: volume.number,
+                        title: volume.name,
+                        language: volume.language,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            allowed_page_hosts: self.manifest.allowed_page_hosts.clone(),
+            allow_local_network: self.manifest.allow_local_network,
         })
     }
 
@@ -1129,13 +1242,49 @@ fn validate_script(script: &str) -> Result<()> {
         })
 }
 
+#[cfg(test)]
 fn run_transform(
     script: &str,
     response: Value,
     source: &str,
     captures: BTreeMap<String, String>,
 ) -> Result<Value> {
+    run_transform_with_network(script, response, source, captures, BTreeMap::new(), None)
+}
+
+#[derive(Clone)]
+struct ScriptNetworkPolicy {
+    allowed_hosts: Vec<String>,
+    allow_local_network: bool,
+}
+
+fn run_transform_with_network(
+    script: &str,
+    response: Value,
+    source: &str,
+    captures: BTreeMap<String, String>,
+    settings: BTreeMap<String, String>,
+    network: Option<ScriptNetworkPolicy>,
+) -> Result<Value> {
     let mut engine = script_engine();
+    if let Some(policy) = network {
+        let requests = Arc::new(AtomicUsize::new(0));
+        engine.register_fn(
+            "http",
+            move |method: &str,
+                  url: &str,
+                  headers: Map,
+                  body: &str|
+                  -> std::result::Result<Dynamic, Box<EvalAltResult>> {
+                let count = requests.fetch_add(1, Ordering::Relaxed) + 1;
+                if count > 64 {
+                    return Err("connector exceeded the 64 request limit".into());
+                }
+                script_http_request(&policy, method, url, headers, body)
+                    .map_err(|error| error.to_string().into())
+            },
+        );
+    }
     let started = std::time::Instant::now();
     engine.on_progress(move |_| {
         (started.elapsed() > std::time::Duration::from_secs(MAX_SCRIPT_SECONDS))
@@ -1156,10 +1305,16 @@ fn run_transform(
             "connector captures could not be passed to Rhai: {error}"
         ))
     })?;
+    let settings = rhai::serde::to_dynamic(settings).map_err(|error| {
+        KomaError::ProviderChanged(format!(
+            "connector settings could not be passed to Rhai: {error}"
+        ))
+    })?;
     let mut scope = Scope::new();
     scope.push_dynamic("response", response);
     scope.push("source", source.to_owned());
     scope.push_dynamic("captures", captures);
+    scope.push_dynamic("settings", settings);
     let output = engine
         .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
         .map_err(|error| {
@@ -1181,6 +1336,120 @@ fn run_transform(
         ));
     }
     Ok(value)
+}
+
+fn script_http_request(
+    policy: &ScriptNetworkPolicy,
+    method: &str,
+    raw_url: &str,
+    headers: Map,
+    body: &str,
+) -> Result<Dynamic> {
+    let url = Url::parse(raw_url)?;
+    if url.username() != "" || url.password().is_some() || url.fragment().is_some() {
+        return Err(KomaError::ImportDenied(
+            "connector HTTP URL contains credentials or a fragment".to_owned(),
+        ));
+    }
+    if url.scheme() != "https" && !(policy.allow_local_network && url.scheme() == "http") {
+        return Err(KomaError::ImportDenied(
+            "connector HTTP requests must use HTTPS".to_owned(),
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| KomaError::ImportDenied("connector HTTP URL has no host".to_owned()))?
+        .to_ascii_lowercase();
+    if !policy
+        .allowed_hosts
+        .iter()
+        .any(|allowed| host_matches(&host, allowed))
+    {
+        return Err(KomaError::ImportDenied(format!(
+            "connector did not declare HTTP access to {host}"
+        )));
+    }
+    let port = url.port_or_known_default().ok_or_else(|| {
+        KomaError::ImportDenied("connector HTTP URL has no recognized port".to_owned())
+    })?;
+    let addresses = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|error| KomaError::ProviderUnavailable(error.to_string()))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty()
+        || (!policy.allow_local_network
+            && addresses
+                .iter()
+                .any(|address| is_non_public_ip(address.ip())))
+    {
+        return Err(KomaError::ImportDenied(
+            "connector HTTP host did not resolve to an allowed address".to_owned(),
+        ));
+    }
+    let mut builder = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("Koma/", env!("CARGO_PKG_VERSION")));
+    for address in addresses {
+        builder = builder.resolve(&host, address);
+    }
+    let client = builder.build()?;
+    let method = reqwest::Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())
+        .map_err(|_| KomaError::ImportDenied("connector HTTP method is invalid".to_owned()))?;
+    let mut request = client.request(method, url);
+    for (name, value) in headers {
+        if matches!(
+            name.as_str().to_ascii_lowercase().as_str(),
+            "host" | "content-length" | "transfer-encoding" | "connection"
+        ) {
+            return Err(KomaError::ImportDenied(format!(
+                "connector HTTP header {name} is managed by Koma"
+            )));
+        }
+        let value = value.into_string().map_err(|_| {
+            KomaError::ImportDenied("connector HTTP header values must be strings".to_owned())
+        })?;
+        request = request.header(name.as_str(), value);
+    }
+    if !body.is_empty() {
+        request = request.body(body.to_owned());
+    }
+    let response = request.send()?;
+    let status = response.status().as_u16();
+    let response_headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_owned(), value.to_owned()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let content_length = response.content_length().unwrap_or(0);
+    if content_length > MAX_JSON_BYTES {
+        return Err(KomaError::ProviderChanged(
+            "connector HTTP response exceeded 32 MiB".to_owned(),
+        ));
+    }
+    let bytes = response.bytes()?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err(KomaError::ProviderChanged(
+            "connector HTTP response exceeded 32 MiB".to_owned(),
+        ));
+    }
+    let text = String::from_utf8(bytes.to_vec()).map_err(|error| {
+        KomaError::ProviderChanged(format!("connector HTTP response is not UTF-8: {error}"))
+    })?;
+    let json = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+    rhai::serde::to_dynamic(serde_json::json!({
+        "status": status,
+        "headers": response_headers,
+        "body": text,
+        "json": json,
+    }))
+    .map_err(|error| KomaError::ProviderChanged(error.to_string()))
 }
 
 fn script_engine() -> Engine {
@@ -1320,7 +1589,7 @@ pub fn bundled_mangafire_summary() -> ConnectorSummary {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use tokio::{
@@ -1328,8 +1597,11 @@ mod tests {
         net::TcpListener,
     };
 
-    use super::{ConnectorManifest, DeclarativeImporter, map_feed, run_transform};
-    use crate::importer::{ImportOptions, ImportScope, LinkImporter};
+    use super::{
+        ConnectorManifest, DeclarativeImporter, ScriptNetworkPolicy, map_feed, run_transform,
+        run_transform_with_network,
+    };
+    use crate::importer::{ImportOptions, ImportScope, LinkImporter, fetch_remote_page};
 
     fn manifest() -> ConnectorManifest {
         ConnectorManifest {
@@ -1360,6 +1632,7 @@ mod tests {
                 page_height: None,
             },
             transform_script: None,
+            settings: BTreeMap::new(),
         }
     }
 
@@ -1448,6 +1721,47 @@ mod tests {
         assert!(result.is_err(), "runaway connector script must be stopped");
     }
 
+    #[test]
+    fn schema_v2_rhai_http_is_guarded_and_usable() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 4096];
+            let read = socket.read(&mut request).expect("read");
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /catalog "));
+            assert!(request.contains("ping"));
+            let body = r#"{"chapters":[]}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("response");
+        });
+        let script = format!(
+            r#"let result = http("POST", "http://{address}/catalog", #{{ "Content-Type": "text/plain" }}, "ping"); result.json"#
+        );
+        let output = run_transform_with_network(
+            &script,
+            serde_json::json!({}),
+            "https://reader.example/title/test",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Some(ScriptNetworkPolicy {
+                allowed_hosts: vec!["127.0.0.1".to_owned()],
+                allow_local_network: true,
+            }),
+        )
+        .expect("script HTTP");
+        assert_eq!(output, serde_json::json!({"chapters": []}));
+        server.join().expect("server");
+    }
+
     #[tokio::test]
     async fn imports_a_local_json_connector_from_source_to_cbz() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
@@ -1469,8 +1783,9 @@ mod tests {
                 ]
             }"#,
         );
+        let served_png = Arc::clone(&png);
         let server = tokio::spawn(async move {
-            for _ in 0..8 {
+            for _ in 0..12 {
                 let (mut socket, _) = listener.accept().await.expect("accept");
                 let mut request = vec![0_u8; 4096];
                 let read = socket.read(&mut request).await.expect("request");
@@ -1488,7 +1803,7 @@ mod tests {
                         format!(r#"{{"pages":["{page_one}"]}}"#).into_bytes(),
                     )
                 } else {
-                    ("image/png", png.as_ref().clone())
+                    ("image/png", served_png.as_ref().clone())
                 };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1532,6 +1847,7 @@ mod tests {
                 page_height: None,
             },
             transform_script: None,
+            settings: BTreeMap::new(),
         };
         let importer = DeclarativeImporter::new(manifest).expect("importer");
         let destination = tempfile::tempdir().expect("destination");
@@ -1541,6 +1857,19 @@ mod tests {
         let preview = importer.preview(&source).await.expect("preview");
         assert_eq!(preview.series_chapter_count, Some(2));
         assert_eq!(preview.series_page_count, Some(2));
+        let online = importer
+            .resolve_online(&source, &options)
+            .await
+            .expect("online publication");
+        assert_eq!(online.chapter_ranges().len(), 2);
+        assert!(online.allow_local_network);
+        assert_eq!(
+            fetch_remote_page(&online, 0)
+                .await
+                .expect("streamed page")
+                .bytes,
+            *png,
+        );
         let receipt = importer
             .import(&source, &options, None)
             .await

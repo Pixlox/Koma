@@ -25,6 +25,7 @@ import type {
   PublicationInspection,
   PublicationMetadata,
 } from "../types";
+import { ResizeHandle } from "./ResizeHandle";
 
 type ToolTab = "health" | "metadata" | "convert";
 
@@ -186,6 +187,15 @@ export function ToolsPanel() {
         aria-modal="true"
         aria-label={tr("Publication tools for {{title}}", { title: item.title })}
       >
+        <ResizeHandle
+          variable="--tools-panel-width"
+          storageKey="koma.panel.tools"
+          min={360}
+          max={640}
+          defaultValue={640}
+          edge="left"
+          label="Resize publication tools"
+        />
         <header className="drawer-header tools-header">
           <div>
             <span className="eyebrow">{tr("Publication tools")}</span>

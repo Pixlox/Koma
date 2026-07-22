@@ -15,13 +15,14 @@ use walkdir::WalkDir;
 use crate::{
     error::{KomaError, Result},
     formats::{is_image_path, modified_at, open_publication},
+    importer::RemotePublication,
     model::{
-        Bookmark, ChapterRange, ImportReceipt, LibraryItem, PublicationFormat, PublicationManifest,
-        ReaderSettings, ReadingState,
+        Bookmark, ChapterRange, ImportReceipt, LibraryItem, PageDescriptor, PublicationFormat,
+        PublicationManifest, PublicationMetadata, ReaderSettings, ReadingDirection, ReadingState,
     },
 };
 
-const LIBRARY_SCHEMA_VERSION: i64 = 4;
+const LIBRARY_SCHEMA_VERSION: i64 = 5;
 const ITEM_COLUMNS: &str = "
     p.id,
     p.path,
@@ -84,6 +85,8 @@ pub struct LibraryBackup {
     pub import_receipts: Vec<ImportReceipt>,
     #[serde(default)]
     pub metadata_overrides: Vec<StoredMetadata>,
+    #[serde(default)]
+    pub online_sources: Vec<StoredOnlineSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +94,13 @@ pub struct LibraryBackup {
 pub struct StoredMetadata {
     pub publication_id: Uuid,
     pub metadata: crate::model::PublicationMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredOnlineSource {
+    pub publication_id: Uuid,
+    pub publication: RemotePublication,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -101,6 +111,7 @@ pub struct BackupRestoreReport {
     pub bookmarks: usize,
     pub import_receipts: usize,
     pub metadata_overrides: usize,
+    pub online_sources: usize,
     pub missing_sources: usize,
 }
 
@@ -149,6 +160,273 @@ impl Library {
             .ok()
             .and_then(|page| thumbnail_data_url(&page.bytes).ok());
         self.upsert_manifest(&manifest, cover_data_url.as_deref())
+    }
+
+    pub fn add_online(
+        &self,
+        publication: &RemotePublication,
+        cover_data_url: Option<&str>,
+    ) -> Result<LibraryItem> {
+        let id = Uuid::now_v7();
+        let mut index = 0_usize;
+        let pages = publication
+            .chapters
+            .iter()
+            .flat_map(|chapter| chapter.pages.iter())
+            .map(|page| {
+                let current = index;
+                index += 1;
+                PageDescriptor {
+                    index: current,
+                    label: (current + 1).to_string(),
+                    source_name: page.url.clone(),
+                    mime_type: "image/*".to_owned(),
+                    byte_size: 0,
+                    width: page.width,
+                    height: page.height,
+                    is_cover: current == 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        if pages.is_empty() {
+            return Err(KomaError::ProviderChanged(
+                "the online publication contains no pages".to_owned(),
+            ));
+        }
+        let path = PathBuf::from(format!("koma-online://{id}"));
+        let fingerprint = blake3::hash(
+            format!(
+                "{}\n{}\n{:?}\n{:?}\n{:?}",
+                publication.provider,
+                publication.source_url,
+                publication.scope,
+                publication.volume_id,
+                publication.selected_chapter_ids
+            )
+            .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        let manifest = PublicationManifest {
+            id,
+            path,
+            format: PublicationFormat::Online,
+            metadata: PublicationMetadata {
+                title: publication.title.clone(),
+                series: Some(publication.title.clone()),
+                number: None,
+                volume: None,
+                summary: None,
+                writer: None,
+                penciller: None,
+                publisher: Some(publication.provider.clone()),
+                language: publication.language.clone(),
+                genres: Vec::new(),
+                tags: vec!["online".to_owned()],
+                web: Some(publication.source_url.clone()),
+                direction: ReadingDirection::Automatic,
+            },
+            pages,
+            chapters: publication.chapter_ranges(),
+            fingerprint,
+            modified_at: None,
+        };
+        let item = self.upsert_manifest(&manifest, cover_data_url)?;
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT OR REPLACE INTO online_sources (publication_id, source_json, updated_at) VALUES (?1, ?2, ?3)",
+            params![id.to_string(), to_json(publication)?, Utc::now().to_rfc3339()],
+        )?;
+        Ok(item)
+    }
+
+    pub fn online_source(&self, publication_id: Uuid) -> Result<Option<RemotePublication>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT source_json FROM online_sources WHERE publication_id = ?1",
+                params![publication_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| from_json(&json))
+            .transpose()
+    }
+
+    pub fn refresh_online(
+        &self,
+        publication_id: Uuid,
+        publication: &RemotePublication,
+    ) -> Result<()> {
+        let page_count = publication.page_count();
+        if page_count == 0 {
+            return Err(KomaError::ProviderChanged(
+                "the refreshed online publication contains no pages".to_owned(),
+            ));
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE publications SET title=?1, page_count=?2, chapters_json=?3, is_missing=0 WHERE id=?4",
+            params![
+                publication.title,
+                page_count as i64,
+                to_json(&publication.chapter_ranges())?,
+                publication_id.to_string(),
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE reading_state SET current_page=MIN(current_page, ?1) WHERE publication_id=?2",
+            params![
+                page_count.saturating_sub(1) as i64,
+                publication_id.to_string()
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE online_sources SET source_json=?1, updated_at=?2 WHERE publication_id=?3",
+            params![
+                to_json(publication)?,
+                Utc::now().to_rfc3339(),
+                publication_id.to_string(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn online_manifest(&self, publication_id: Uuid) -> Result<Option<PublicationManifest>> {
+        let Some(publication) = self.online_source(publication_id)? else {
+            return Ok(None);
+        };
+        let item = self
+            .get(publication_id)?
+            .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+        let mut index = 0_usize;
+        let pages = publication
+            .chapters
+            .iter()
+            .flat_map(|chapter| chapter.pages.iter())
+            .map(|page| {
+                let current = index;
+                index += 1;
+                PageDescriptor {
+                    index: current,
+                    label: (current + 1).to_string(),
+                    source_name: page.url.clone(),
+                    mime_type: "image/*".to_owned(),
+                    byte_size: 0,
+                    width: page.width,
+                    height: page.height,
+                    is_cover: current == 0,
+                }
+            })
+            .collect();
+        Ok(Some(PublicationManifest {
+            id: publication_id,
+            path: item.path,
+            format: PublicationFormat::Online,
+            metadata: PublicationMetadata {
+                title: item.title,
+                series: item.series,
+                number: item.number,
+                volume: item.volume,
+                summary: None,
+                writer: None,
+                penciller: None,
+                publisher: Some(publication.provider.clone()),
+                language: publication.language.clone(),
+                genres: Vec::new(),
+                tags: vec!["online".to_owned()],
+                web: Some(publication.source_url.clone()),
+                direction: ReadingDirection::Automatic,
+            },
+            pages,
+            chapters: publication.chapter_ranges(),
+            fingerprint: format!("online:{publication_id}"),
+            modified_at: None,
+        }))
+    }
+
+    pub fn replace_online_with_path(
+        &self,
+        publication_id: Uuid,
+        path: impl AsRef<Path>,
+    ) -> Result<LibraryItem> {
+        let old_source = self.online_source(publication_id)?;
+        let old_state = self.reading_state(publication_id)?;
+        let reader = open_publication(path.as_ref(), None)?;
+        let manifest = reader.manifest().clone();
+        let cover_data_url = reader
+            .read_page(0)
+            .ok()
+            .and_then(|page| thumbnail_data_url(&page.bytes).ok());
+        let mapped_page = old_source
+            .as_ref()
+            .zip(old_state.as_ref())
+            .and_then(|(source, state)| {
+                let old = source.chapter_ranges().into_iter().find(|chapter| {
+                    state.current_page >= chapter.start_page_index
+                        && state.current_page <= chapter.end_page_index
+                })?;
+                let offset = state.current_page.saturating_sub(old.start_page_index);
+                let next = manifest.chapters.iter().find(|chapter| {
+                    (old.id.is_some() && chapter.id == old.id)
+                        || (chapter.number - old.number).abs() < f64::EPSILON
+                })?;
+                Some((next.start_page_index + offset).min(next.end_page_index))
+            })
+            .or_else(|| old_state.as_ref().map(|state| state.current_page))
+            .unwrap_or(0)
+            .min(manifest.pages.len().saturating_sub(1));
+        let mapped_chapter = chapter_at_page(&manifest.chapters, mapped_page);
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let database_path = path_to_database(&manifest.path);
+        let conflict = transaction
+            .query_row(
+                "SELECT id FROM publications WHERE path = ?1 AND id <> ?2",
+                params![database_path, publication_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if conflict.is_some() {
+            return Err(KomaError::Other(
+                "the downloaded file already belongs to another library entry".to_owned(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE publications SET path=?1, format_json=?2, fingerprint=?3, title=?4, series=?5, number=?6, volume=?7, page_count=?8, chapters_json=?9, cover_data_url=COALESCE(?10, cover_data_url), modified_at=?11, is_missing=0 WHERE id=?12",
+            params![
+                database_path,
+                to_json(&manifest.format)?,
+                manifest.fingerprint,
+                manifest.metadata.title,
+                manifest.metadata.series,
+                manifest.metadata.number,
+                manifest.metadata.volume,
+                manifest.pages.len() as i64,
+                to_json(&manifest.chapters)?,
+                cover_data_url,
+                manifest.modified_at.map(|date| date.to_rfc3339()),
+                publication_id.to_string(),
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM online_sources WHERE publication_id = ?1",
+            params![publication_id.to_string()],
+        )?;
+        transaction.execute(
+            "UPDATE reading_state SET current_page=?1, current_chapter=?2, progress=CASE WHEN ?3 <= 1 THEN 1.0 ELSE CAST(?1 AS REAL) / CAST(?3 - 1 AS REAL) END WHERE publication_id=?4",
+            params![mapped_page as i64, mapped_chapter, manifest.pages.len() as i64, publication_id.to_string()],
+        )?;
+        transaction.commit()?;
+        item_by_id(&connection, publication_id)?.ok_or_else(|| {
+            KomaError::Other("the downloaded publication disappeared while saving".to_owned())
+        })
+    }
+
+    pub fn thumbnail_data_url(bytes: &[u8]) -> Result<String> {
+        thumbnail_data_url(bytes)
     }
 
     pub fn relink(
@@ -1069,6 +1347,7 @@ impl Library {
             bookmarks,
             import_receipts: self.import_receipts()?,
             metadata_overrides: self.metadata_overrides()?,
+            online_sources: self.online_sources()?,
         })
     }
 
@@ -1084,7 +1363,7 @@ impl Library {
         let mut report = BackupRestoreReport::default();
 
         for item in &backup.items {
-            let is_missing = !item.path.exists();
+            let is_missing = item.format != PublicationFormat::Online && !item.path.exists();
             transaction.execute(
                 "
                 INSERT INTO publications (
@@ -1240,6 +1519,17 @@ impl Library {
             )?;
             report.metadata_overrides += 1;
         }
+        for stored in &backup.online_sources {
+            transaction.execute(
+                "INSERT OR REPLACE INTO online_sources (publication_id, source_json, updated_at) VALUES (?1, ?2, ?3)",
+                params![
+                    stored.publication_id.to_string(),
+                    to_json(&stored.publication)?,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            report.online_sources += 1;
+        }
 
         transaction.commit()?;
         Ok(report)
@@ -1262,6 +1552,25 @@ impl Library {
             });
         }
         Ok(values)
+    }
+
+    fn online_sources(&self) -> Result<Vec<StoredOnlineSource>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT publication_id, source_json FROM online_sources ORDER BY publication_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut sources = Vec::new();
+        for row in rows {
+            let (publication_id, source_json) = row?;
+            sources.push(StoredOnlineSource {
+                publication_id: parse_uuid(&publication_id)?,
+                publication: from_json(&source_json)?,
+            });
+        }
+        Ok(sources)
     }
 
     fn import_receipts(&self) -> Result<Vec<ImportReceipt>> {
@@ -1295,18 +1604,21 @@ impl Library {
 
     pub fn refresh_missing_flags(&self) -> Result<usize> {
         let connection = self.lock()?;
-        let mut statement = connection.prepare("SELECT id, path, is_missing FROM publications")?;
+        let mut statement =
+            connection.prepare("SELECT id, path, is_missing, format_json FROM publications")?;
         let rows = statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, bool>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
         let mut updates = Vec::new();
         for row in rows {
-            let (id, path, was_missing) = row?;
-            let is_missing = !Path::new(&path).exists();
+            let (id, path, was_missing, format_json) = row?;
+            let format: PublicationFormat = from_json(&format_json)?;
+            let is_missing = format != PublicationFormat::Online && !Path::new(&path).exists();
             if is_missing != was_missing {
                 updates.push((id, is_missing));
             }
@@ -1395,6 +1707,14 @@ fn migrate(connection: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS metadata_overrides (
             publication_id TEXT PRIMARY KEY,
             metadata_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (publication_id) REFERENCES publications(id)
+                ON DELETE CASCADE ON UPDATE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS online_sources (
+            publication_id TEXT PRIMARY KEY,
+            source_json TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (publication_id) REFERENCES publications(id)
                 ON DELETE CASCADE ON UPDATE CASCADE
@@ -1644,9 +1964,53 @@ mod tests {
     use super::Library;
     use crate::{
         formats::ZipPublication,
+        importer::{ImportScope, RemoteChapter, RemotePage, RemotePublication},
         metadata::ComicInfo,
         model::{ChapterRange, KomaArchiveMetadata, PublicationFormat, ReadingDirection},
     };
+
+    fn remote_publication() -> RemotePublication {
+        RemotePublication {
+            provider: "Fixture".to_owned(),
+            source_url: "https://reader.example/title/test".to_owned(),
+            eligibility_url: "https://reader.example/title/test".to_owned(),
+            eligibility_status: 200,
+            title: "Online proof".to_owned(),
+            language: Some("en".to_owned()),
+            scope: ImportScope::Series,
+            volume_id: None,
+            chapter_id: None,
+            selected_chapter_ids: vec![],
+            chapters: vec![
+                RemoteChapter {
+                    id: Some("10".to_owned()),
+                    number: 1.0,
+                    title: Some("One".to_owned()),
+                    volume: Some(1.0),
+                    pages: vec![RemotePage {
+                        url: "https://images.reader.example/1.png".to_owned(),
+                        width: Some(1),
+                        height: Some(1),
+                    }],
+                },
+                RemoteChapter {
+                    id: Some("11".to_owned()),
+                    number: 2.0,
+                    title: Some("Two".to_owned()),
+                    volume: Some(1.0),
+                    pages: vec![RemotePage {
+                        url: "https://images.reader.example/2.png".to_owned(),
+                        width: Some(1),
+                        height: Some(1),
+                    }],
+                },
+            ],
+            chapter_catalog: Vec::new(),
+            volume_catalog: Vec::new(),
+            allowed_page_hosts: vec!["images.reader.example".to_owned()],
+            allow_local_network: false,
+        }
+    }
 
     fn tiny_png() -> Vec<u8> {
         vec![
@@ -1672,6 +2036,25 @@ mod tests {
             &info,
         )
         .expect("write fixture");
+    }
+
+    #[test]
+    fn online_publications_persist_ranges_and_never_look_missing() {
+        let library = Library::in_memory().expect("library");
+        let item = library
+            .add_online(&remote_publication(), None)
+            .expect("online item");
+        assert_eq!(item.format, PublicationFormat::Online);
+        let manifest = library
+            .online_manifest(item.id)
+            .expect("manifest")
+            .expect("online manifest");
+        assert_eq!(manifest.pages.len(), 2);
+        assert_eq!(manifest.chapters[1].start_page_index, 1);
+        library.refresh_missing_flags().expect("missing refresh");
+        assert!(!library.get(item.id).expect("get").expect("item").is_missing);
+        let backup = library.export_backup().expect("backup");
+        assert_eq!(backup.online_sources.len(), 1);
     }
 
     #[test]

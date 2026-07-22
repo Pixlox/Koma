@@ -11,12 +11,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use koma_core::{
     BackupRestoreReport, Bookmark, ConnectorManifest, ConnectorSummary, ConversionOptions,
-    ConversionReport, DeclarativeImporter, ImportOptions, ImportPreview, ImportReceipt, KomaError,
-    Library, LibraryBackup, LibraryFolder, LibraryItem, LibraryScanReport, LinkImporter,
-    MangaFireImporter, PageData, PublicationFormat, PublicationInspection, PublicationManifest,
-    PublicationMetadata, PublicationReader, ReaderSettings, ReadingState,
-    bundled_mangafire_summary, convert_to_cbz, formats::with_metadata,
-    inspect_publication as inspect_path, open_publication, repair_to_cbz,
+    ConversionReport, DeclarativeImporter, ImportOptions, ImportPreview, ImportReceipt,
+    ImportScope, KomaError, Library, LibraryBackup, LibraryFolder, LibraryItem, LibraryScanReport,
+    LinkImporter, MangaFireImporter, PageData, PublicationFormat, PublicationInspection,
+    PublicationManifest, PublicationMetadata, PublicationReader, ReaderSettings, ReadingState,
+    RemotePublication, bundled_mangafire_summary, convert_to_cbz, fetch_remote_page,
+    formats::with_metadata, inspect_publication as inspect_path, open_publication, repair_to_cbz,
     write_publication_metadata,
 };
 use serde::Serialize;
@@ -36,11 +36,13 @@ struct AppState {
     connectors: Mutex<Vec<Arc<DeclarativeImporter>>>,
     pending_connector_packages: Mutex<HashMap<Uuid, Vec<u8>>>,
     pending_file_uploads: Mutex<HashMap<Uuid, PendingFileUpload>>,
+    import_tasks: Mutex<HashMap<Uuid, tokio::task::AbortHandle>>,
     connectors_directory: PathBuf,
     readers: Mutex<HashMap<Uuid, Arc<dyn PublicationReader>>>,
     pending_open_paths: Mutex<Vec<PathBuf>>,
     default_import_directory: PathBuf,
     managed_library_directory: PathBuf,
+    online_cache_directory: PathBuf,
     tracking: Arc<TrackingService>,
     last_tracking_auth: Mutex<Option<TrackingAuthEvent>>,
     handled_oauth_callbacks: Mutex<BTreeSet<u64>>,
@@ -66,6 +68,10 @@ impl AppState {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("connectors");
+        let online_cache_directory = database_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("online-cache");
         let connectors = load_connectors(&connectors_directory)?;
         let tracking = Arc::new(
             TrackingService::new(
@@ -82,11 +88,13 @@ impl AppState {
             connectors: Mutex::new(connectors),
             pending_connector_packages: Mutex::new(HashMap::new()),
             pending_file_uploads: Mutex::new(HashMap::new()),
+            import_tasks: Mutex::new(HashMap::new()),
             connectors_directory,
             readers: Mutex::new(HashMap::new()),
             pending_open_paths: Mutex::new(pending_open_paths),
             default_import_directory,
             managed_library_directory,
+            online_cache_directory,
             tracking,
             last_tracking_auth: Mutex::new(None),
             handled_oauth_callbacks: Mutex::new(BTreeSet::new()),
@@ -147,6 +155,78 @@ impl AppState {
                 )
             })
     }
+}
+
+const ONLINE_CACHE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
+
+async fn cached_online_page(
+    cache_directory: &Path,
+    publication: &RemotePublication,
+    page_index: usize,
+) -> Result<PageData, KomaError> {
+    let page_url = publication
+        .chapters
+        .iter()
+        .flat_map(|chapter| chapter.pages.iter())
+        .nth(page_index)
+        .ok_or(KomaError::PageOutOfRange { index: page_index })?
+        .url
+        .as_bytes();
+    let key = blake3::hash(page_url).to_hex().to_string();
+    let data_path = cache_directory.join(format!("{key}.data"));
+    let mime_path = cache_directory.join(format!("{key}.mime"));
+    if data_path.is_file() && mime_path.is_file() {
+        let bytes = tokio::fs::read(&data_path).await?;
+        let mime_type = tokio::fs::read_to_string(&mime_path).await?;
+        return Ok(PageData {
+            index: page_index,
+            mime_type,
+            bytes,
+        });
+    }
+    let page = fetch_remote_page(publication, page_index).await?;
+    tokio::fs::create_dir_all(cache_directory).await?;
+    tokio::fs::write(&data_path, &page.bytes).await?;
+    tokio::fs::write(&mime_path, &page.mime_type).await?;
+    prune_online_cache(cache_directory)?;
+    Ok(page)
+}
+
+fn prune_online_cache(directory: &Path) -> Result<(), KomaError> {
+    let mut entries = std::fs::read_dir(directory)?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file()
+                || entry.path().extension().and_then(|value| value.to_str()) != Some("data")
+            {
+                return None;
+            }
+            Some((
+                entry.path(),
+                metadata.len(),
+                metadata
+                    .modified()
+                    .ok()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut total = entries.iter().map(|(_, size, _)| size).sum::<u64>();
+    if total <= ONLINE_CACHE_LIMIT_BYTES {
+        return Ok(());
+    }
+    entries.sort_by_key(|(_, _, modified)| *modified);
+    for (path, size, _) in entries {
+        if total <= ONLINE_CACHE_LIMIT_BYTES {
+            break;
+        }
+        let mime = path.with_extension("mime");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(mime);
+        total = total.saturating_sub(size);
+    }
+    Ok(())
 }
 
 fn safe_import_file_name(file_name: &str) -> Result<String, KomaError> {
@@ -396,6 +476,14 @@ struct ReaderOpenPayload {
     manifest: PublicationManifest,
     reading_state: Option<ReadingState>,
     bookmarks: Vec<Bookmark>,
+    online_source: Option<RemotePublication>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OnlineNavigationResult {
+    item: LibraryItem,
+    reader: ReaderOpenPayload,
 }
 
 #[derive(Debug, Serialize)]
@@ -425,6 +513,13 @@ impl From<PageData> for PagePayload {
 struct LinkImportResult {
     receipt: ImportReceipt,
     item: LibraryItem,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportEventPayload {
+    job_id: Uuid,
+    event: koma_core::ImportEvent,
 }
 
 #[derive(Debug, Serialize)]
@@ -847,6 +942,27 @@ fn set_reading_status(
         .set_reading_status(publication_id, completed)?)
 }
 
+fn online_reader_payload(
+    state: &AppState,
+    publication_id: Uuid,
+) -> Result<ReaderOpenPayload, CommandError> {
+    let manifest = state
+        .library
+        .online_manifest(publication_id)?
+        .ok_or_else(|| CommandError {
+            code: "missing_source",
+            message: "the online source is no longer available".to_owned(),
+            recoverable: true,
+        })?;
+    Ok(ReaderOpenPayload {
+        library_id: publication_id,
+        manifest,
+        reading_state: state.library.reading_state(publication_id)?,
+        bookmarks: state.library.bookmarks(publication_id)?,
+        online_source: state.library.online_source(publication_id)?,
+    })
+}
+
 #[tauri::command]
 async fn open_reader(
     app: AppHandle,
@@ -869,6 +985,9 @@ async fn open_reader(
             recoverable: true,
         });
     }
+    if item.format == PublicationFormat::Online {
+        return online_reader_payload(&state, publication_id);
+    }
     let reader = state.open_reader(publication_id, password.as_deref())?;
     if reader.manifest().format == koma_core::PublicationFormat::Pdf {
         app.asset_protocol_scope()
@@ -884,6 +1003,7 @@ async fn open_reader(
         manifest: reader.manifest().clone(),
         reading_state: state.library.reading_state(publication_id)?,
         bookmarks: state.library.bookmarks(publication_id)?,
+        online_source: None,
     })
 }
 
@@ -893,6 +1013,12 @@ async fn read_page(
     publication_id: Uuid,
     page_index: usize,
 ) -> Result<PagePayload, CommandError> {
+    if let Some(publication) = state.library.online_source(publication_id)? {
+        return cached_online_page(&state.online_cache_directory, &publication, page_index)
+            .await
+            .map(PagePayload::from)
+            .map_err(Into::into);
+    }
     let reader = state.cached_reader(publication_id)?;
     tauri::async_runtime::spawn_blocking(move || reader.read_page(page_index))
         .await
@@ -1078,6 +1204,7 @@ fn handle_tracking_oauth_url(app: AppHandle, callback: String) {
             *last_event = Some(event.clone());
         }
         let _ = app.emit("koma://tracking-auth", event);
+        #[cfg(desktop)]
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.show();
             let _ = window.unminimize();
@@ -1291,22 +1418,183 @@ async fn import_link(
     state: State<'_, AppState>,
     source: String,
     options: ImportOptions,
+    job_id: Uuid,
 ) -> Result<LinkImportResult, CommandError> {
     let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
     let event_app = app.clone();
-    tauri::async_runtime::spawn(async move {
+    let event_task = tauri::async_runtime::spawn(async move {
         while let Some(event) = event_receiver.recv().await {
-            let _ = event_app.emit("koma://import-event", event);
+            let _ = event_app.emit("koma://import-event", ImportEventPayload { job_id, event });
         }
     });
 
     let importer = state.importer_for(&source)?;
-    let receipt = importer
-        .import(&source, &options, Some(&event_sender))
-        .await?;
-    drop(event_sender);
+    let task = tokio::spawn(async move {
+        importer
+            .import(&source, &options, Some(&event_sender))
+            .await
+    });
+    state
+        .import_tasks
+        .lock()
+        .map_err(|_| KomaError::Other("the download task lock was poisoned".to_owned()))?
+        .insert(job_id, task.abort_handle());
+    let result = task.await;
+    let _ = event_task.await;
+    state
+        .import_tasks
+        .lock()
+        .map_err(|_| KomaError::Other("the download task lock was poisoned".to_owned()))?
+        .remove(&job_id);
+    let receipt = match result {
+        Ok(result) => result?,
+        Err(error) if error.is_cancelled() => return Err(KomaError::Cancelled.into()),
+        Err(error) => {
+            return Err(KomaError::Other(format!("download task failed: {error}")).into());
+        }
+    };
     state.library.save_import_receipt(&receipt)?;
     let item = state.library.import_path(&receipt.output_path, None)?;
+    Ok(LinkImportResult { receipt, item })
+}
+
+#[tauri::command]
+fn cancel_import(state: State<'_, AppState>, job_id: Uuid) -> Result<bool, CommandError> {
+    let task = state
+        .import_tasks
+        .lock()
+        .map_err(|_| KomaError::Other("the download task lock was poisoned".to_owned()))?
+        .remove(&job_id);
+    if let Some(task) = task {
+        task.abort();
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+#[tauri::command]
+async fn read_link_online(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source: String,
+    options: ImportOptions,
+) -> Result<LibraryItem, CommandError> {
+    let importer = state.importer_for(&source)?;
+    let publication = importer.resolve_online(&source, &options).await?;
+    let cover = cached_online_page(&state.online_cache_directory, &publication, 0)
+        .await
+        .ok()
+        .and_then(|page| Library::thumbnail_data_url(&page.bytes).ok());
+    let item = state.library.add_online(&publication, cover.as_deref())?;
+    let _ = app.emit("koma://library-changed", ());
+    Ok(item)
+}
+
+#[tauri::command]
+async fn navigate_online_publication(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    target_scope: ImportScope,
+    target_id: u64,
+) -> Result<OnlineNavigationResult, CommandError> {
+    if target_scope == ImportScope::Series {
+        return Err(KomaError::Other("choose a chapter or volume to open".to_owned()).into());
+    }
+    let stored = state
+        .library
+        .online_source(publication_id)?
+        .ok_or_else(|| KomaError::Other("this publication is already downloaded".to_owned()))?;
+    let importer = state.importer_for(&stored.source_url)?;
+    let mut next = importer
+        .navigate_online(&stored, target_scope, target_id)
+        .await?;
+    next.scope = stored.scope;
+    next.selected_chapter_ids = stored.selected_chapter_ids.clone();
+    if !stored.chapter_catalog.is_empty() {
+        next.chapter_catalog = stored.chapter_catalog;
+    }
+    if !stored.volume_catalog.is_empty() {
+        next.volume_catalog = stored.volume_catalog;
+    }
+    state.library.refresh_online(publication_id, &next)?;
+    state.library.save_progress(publication_id, 0, None)?;
+    let item = state
+        .library
+        .get(publication_id)?
+        .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
+    let reader = online_reader_payload(&state, publication_id)?;
+    let _ = app.emit("koma://library-changed", ());
+    Ok(OnlineNavigationResult { item, reader })
+}
+
+#[tauri::command]
+async fn download_online_publication(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    publication_id: Uuid,
+    options: Option<ImportOptions>,
+    job_id: Uuid,
+) -> Result<LinkImportResult, CommandError> {
+    let online = state
+        .library
+        .online_source(publication_id)?
+        .ok_or_else(|| KomaError::Other("this publication is already downloaded".to_owned()))?;
+    let mut options = options.unwrap_or_else(|| {
+        let mut options = ImportOptions::new(state.default_import_directory.clone());
+        options.scope = online.scope;
+        options.volume_id = online.volume_id;
+        options.chapter_id = online.chapter_id;
+        options.selected_chapter_ids = online.selected_chapter_ids.clone();
+        options.preferred_language = online.language.clone();
+        options
+    });
+    if options.destination_directory.as_os_str().is_empty() {
+        options.destination_directory = state.default_import_directory.clone();
+    }
+    let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let event_app = app.clone();
+    let event_task = tauri::async_runtime::spawn(async move {
+        while let Some(event) = event_receiver.recv().await {
+            let _ = event_app.emit("koma://import-event", ImportEventPayload { job_id, event });
+        }
+    });
+    let importer = state.importer_for(&online.source_url)?;
+    let source_url = online.source_url.clone();
+    let task = tokio::spawn(async move {
+        importer
+            .import(&source_url, &options, Some(&event_sender))
+            .await
+    });
+    state
+        .import_tasks
+        .lock()
+        .map_err(|_| KomaError::Other("the download task lock was poisoned".to_owned()))?
+        .insert(job_id, task.abort_handle());
+    let result = task.await;
+    let _ = event_task.await;
+    state
+        .import_tasks
+        .lock()
+        .map_err(|_| KomaError::Other("the download task lock was poisoned".to_owned()))?
+        .remove(&job_id);
+    let receipt = match result {
+        Ok(result) => result?,
+        Err(error) if error.is_cancelled() => return Err(KomaError::Cancelled.into()),
+        Err(error) => {
+            return Err(KomaError::Other(format!("download task failed: {error}")).into());
+        }
+    };
+    state.library.save_import_receipt(&receipt)?;
+    let item = state
+        .library
+        .replace_online_with_path(publication_id, &receipt.output_path)?;
+    state
+        .readers
+        .lock()
+        .map_err(|_| KomaError::Other("the reader cache lock was poisoned".to_owned()))?
+        .remove(&publication_id);
+    let _ = app.emit("koma://library-changed", ());
     Ok(LinkImportResult { receipt, item })
 }
 
@@ -1704,6 +1992,10 @@ pub fn run() {
             remove_connector,
             preview_link,
             import_link,
+            cancel_import,
+            read_link_online,
+            navigate_online_publication,
+            download_online_publication,
             #[cfg(desktop)]
             set_discord_presence,
             export_library_backup,

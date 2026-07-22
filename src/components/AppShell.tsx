@@ -9,6 +9,7 @@ import {
   ChevronRight,
   CircleCheckBig,
   Clock3,
+  Download,
   Eye,
   EyeOff,
   ExternalLink,
@@ -37,6 +38,7 @@ import {
 import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -54,6 +56,7 @@ import {
   type AvailableUpdate,
 } from "../lib/updater";
 import { useKomaStore } from "../store/koma";
+import { ResizeHandle } from "./ResizeHandle";
 import type {
   LibraryFolder,
   LibraryItem,
@@ -91,6 +94,7 @@ const FORMAT_LABELS: Record<PublicationFormat, string> = {
   folder: "FOLDER",
   pdf: "PDF",
   fixedLayoutEpub: "EPUB",
+  online: "ONLINE",
 };
 
 function routeTitle(route: LibraryRoute): string {
@@ -261,6 +265,15 @@ function Sidebar({ open }: { open: boolean }) {
       aria-label="Koma"
       data-tauri-drag-region
     >
+      <ResizeHandle
+        variable="--sidebar-width"
+        storageKey="koma.panel.sidebar"
+        min={176}
+        max={320}
+        defaultValue={208}
+        edge="right"
+        label="Resize navigation"
+      />
       <div className="brand" data-tauri-drag-region>
         <img src="/koma-mark.svg" alt="" data-tauri-drag-region />
         <span data-tauri-drag-region>Koma</span>
@@ -863,6 +876,7 @@ function BookMenu({ item }: { item: LibraryItem }) {
   const setHidden = useKomaStore((state) => state.setHidden);
   const setCompleted = useKomaStore((state) => state.setCompleted);
   const revealItem = useKomaStore((state) => state.revealItem);
+  const downloadOnline = useKomaStore((state) => state.downloadOnline);
   const relinkItem = useKomaStore((state) => state.relinkItem);
   const removeItem = useKomaStore((state) => state.removeItem);
   const setToolsItemId = useKomaStore((state) => state.setToolsItemId);
@@ -894,6 +908,15 @@ function BookMenu({ item }: { item: LibraryItem }) {
             <Heart size={16} fill={item.isFavorite ? "currentColor" : "none"} />
             {tr(item.isFavorite ? "Remove favorite" : "Favorite")}
           </DropdownMenu.Item>
+          {item.format === "online" && (
+            <DropdownMenu.Item
+              className="menu-item"
+              onSelect={() => void downloadOnline(item)}
+            >
+              <Download size={16} />
+              {tr("Download to library")}
+            </DropdownMenu.Item>
+          )}
           <DropdownMenu.Item
             className="menu-item"
             onSelect={() => void setHidden(item, !item.isHidden)}
@@ -908,14 +931,16 @@ function BookMenu({ item }: { item: LibraryItem }) {
             <CircleCheckBig size={16} />
             {tr(item.isCompleted ? "Mark as unread" : "Mark as read")}
           </DropdownMenu.Item>
-          <DropdownMenu.Item
-            className="menu-item"
-            onSelect={() => setToolsItemId(item.id)}
-          >
-            <Wrench size={16} />
-            {tr("Inspect, edit, and convert")}
-          </DropdownMenu.Item>
-          {!mobile && (
+          {item.format !== "online" && (
+            <DropdownMenu.Item
+              className="menu-item"
+              onSelect={() => setToolsItemId(item.id)}
+            >
+              <Wrench size={16} />
+              {tr("Inspect, edit, and convert")}
+            </DropdownMenu.Item>
+          )}
+          {!mobile && item.format !== "online" && (
             <DropdownMenu.Item
               className="menu-item"
               onSelect={() => void revealItem(item)}
@@ -972,6 +997,7 @@ function DetailInspector({ item }: { item: LibraryItem }) {
   const openingId = useKomaStore((state) => state.readerOpeningId);
   const setFavorite = useKomaStore((state) => state.setFavorite);
   const revealItem = useKomaStore((state) => state.revealItem);
+  const downloadOnline = useKomaStore((state) => state.downloadOnline);
   const relinkItem = useKomaStore((state) => state.relinkItem);
   const setToolsItemId = useKomaStore((state) => state.setToolsItemId);
   return (
@@ -979,6 +1005,15 @@ function DetailInspector({ item }: { item: LibraryItem }) {
       className="detail-inspector"
       aria-label={tr("Details for {{title}}", { title: item.title })}
     >
+      <ResizeHandle
+        variable="--inspector-width"
+        storageKey="koma.panel.inspector"
+        min={260}
+        max={480}
+        defaultValue={298}
+        edge="left"
+        label="Resize details"
+      />
       <div className="inspector-cover">
         {item.coverDataUrl !== null ? (
           <img src={item.coverDataUrl} alt="" />
@@ -1040,12 +1075,22 @@ function DetailInspector({ item }: { item: LibraryItem }) {
         </div>
         <div>
           <dt>{tr("Location")}</dt>
-          <dd title={item.path}>{item.path.split(/[\\/]/).slice(-2).join("/")}</dd>
+          <dd title={item.path}>
+            {item.format === "online"
+              ? tr("Web source")
+              : item.path.split(/[\\/]/).slice(-2).join("/")}
+          </dd>
         </div>
         <div>
           <dt>{tr("Status")}</dt>
           <dd className={item.isMissing ? "danger-text" : ""}>
-            {tr(item.isMissing ? "Source missing" : "Available offline")}
+            {tr(
+              item.isMissing
+                ? "Source missing"
+                : item.format === "online"
+                  ? "Available online"
+                  : "Available offline",
+            )}
           </dd>
         </div>
       </dl>
@@ -1053,28 +1098,41 @@ function DetailInspector({ item }: { item: LibraryItem }) {
       <div className="inspector-actions">
         <button
           type="button"
-          className="secondary-button"
+          className={`secondary-button${item.format === "online" ? " inspector-favorite-wide" : ""}`}
           onClick={() => void setFavorite(item, !item.isFavorite)}
         >
           <Heart size={16} fill={item.isFavorite ? "currentColor" : "none"} />
           {tr(item.isFavorite ? "Favorited" : "Favorite")}
         </button>
-        <button
-          type="button"
-          className="secondary-button"
-          onClick={() => setToolsItemId(item.id)}
-        >
-          <Wrench size={16} />
-          {tr("Tools")}
-        </button>
-        <button
-          type="button"
-          className="secondary-button inspector-reveal"
-          onClick={() => void revealItem(item)}
-        >
-          <FolderOpen size={16} />
-          {tr("Reveal")}
-        </button>
+        {item.format !== "online" && (
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => setToolsItemId(item.id)}
+          >
+            <Wrench size={16} />
+            {tr("Tools")}
+          </button>
+        )}
+        {item.format === "online" ? (
+          <button
+            type="button"
+            className="secondary-button inspector-reveal"
+            onClick={() => void downloadOnline(item)}
+          >
+            <Download size={16} />
+            {tr("Download to library")}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="secondary-button inspector-reveal"
+            onClick={() => void revealItem(item)}
+          >
+            <FolderOpen size={16} />
+            {tr("Reveal")}
+          </button>
+        )}
       </div>
     </aside>
   );
@@ -1485,6 +1543,7 @@ function TrackingSettings() {
 }
 
 function TrackingMatcher({ item }: { item: LibraryItem }) {
+  const notify = useKomaStore((state) => state.notify);
   const [accounts, setAccounts] = useState<TrackingAccount[]>([]);
   const [mappings, setMappings] = useState<TrackingMapping[]>([]);
   const [remoteProgress, setRemoteProgress] = useState<
@@ -1496,22 +1555,31 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
   const [editing, setEditing] = useState<TrackingProvider | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [matchError, setMatchError] = useState<string | null>(null);
+
+  const reportTrackingError = useCallback((provider: TrackingProvider | null, caught: unknown) => {
+    const name =
+      TRACKING_PROVIDERS.find((candidate) => candidate.id === provider)?.label ??
+      tr("Reading tracking");
+    notify(
+      tr("Tracking unavailable"),
+      tr("{{name}} could not be reached. Try again in a moment.", { name }),
+      "warning",
+    );
+    console.warn("Tracking request failed", errorMessage(caught));
+  }, [notify]);
 
   const refreshProgress = () => {
     setRefreshing(true);
-    setMatchError(null);
     return backend
       .trackingRemoteProgress(item.id)
       .then(setRemoteProgress)
-      .catch((caught) => setMatchError(errorMessage(caught)))
+      .catch((caught) => reportTrackingError(null, caught))
       .finally(() => setRefreshing(false));
   };
 
   const loadCandidates = (provider: TrackingProvider) => {
     setEditing(provider);
     setLoading(true);
-    setMatchError(null);
     void backend
       .suggestTracking(provider, item.series ?? item.title)
       .then((suggestion) => {
@@ -1520,14 +1588,16 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
           [provider]: suggestion.candidates,
         }));
       })
-      .catch((caught) => setMatchError(errorMessage(caught)))
+      .catch((caught) => {
+        setCandidates((current) => ({ ...current, [provider]: [] }));
+        reportTrackingError(provider, caught);
+      })
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setMatchError(null);
     setEditing(null);
     setRemoteProgress([]);
     void Promise.all([
@@ -1548,10 +1618,16 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
                 ),
             )
             .map(async (account) => {
-              const suggestion = await backend.suggestTracking(
-                account.provider,
-                item.series ?? item.title,
-              );
+              let suggestion;
+              try {
+                suggestion = await backend.suggestTracking(
+                  account.provider,
+                  item.series ?? item.title,
+                );
+              } catch (caught) {
+                reportTrackingError(account.provider, caught);
+                return { provider: account.provider, mapping: null, candidates: [] };
+              }
               const first = suggestion.candidates[0];
               if (suggestion.automatic && first !== undefined) {
                 const mapping = {
@@ -1586,7 +1662,7 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
         if (active) setRemoteProgress(progress);
       })
       .catch((caught) => {
-        if (active) setMatchError(errorMessage(caught));
+        if (active) reportTrackingError(null, caught);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -1594,7 +1670,7 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
     return () => {
       active = false;
     };
-  }, [item.id, item.series, item.title]);
+  }, [item.id, item.series, item.title, reportTrackingError]);
 
   const connected = accounts.filter((account) => account.connected);
   if (connected.length === 0) return null;
@@ -1678,12 +1754,29 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
                         );
                         loadCandidates(account.provider);
                       })
-                      .catch((caught) => setMatchError(errorMessage(caught)));
+                      .catch((caught) =>
+                        reportTrackingError(account.provider, caught),
+                      );
                   }}
                 >
                   {tr("Unlink")}
                 </button>
               </div>
+            </div>
+          );
+        }
+        if (!loading && options.length === 0) {
+          return (
+            <div className="tracking-match tracking-none" key={account.provider}>
+              <span>{label}</span>
+              <strong>{tr("None found")}</strong>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => loadCandidates(account.provider)}
+              >
+                {tr("Try again")}
+              </button>
             </div>
           );
         }
@@ -1733,7 +1826,6 @@ function TrackingMatcher({ item }: { item: LibraryItem }) {
           </label>
         );
       })}
-      {matchError !== null && <span className="danger-text">{matchError}</span>}
     </div>
   );
 }
