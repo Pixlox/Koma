@@ -9,6 +9,7 @@ import type {
   ConnectorPackagePreview,
   ConnectorSummary,
   LibraryItem,
+  ImportOptions,
   LibraryFolder,
   LibraryRoute,
   LibrarySortMode,
@@ -21,6 +22,7 @@ import type {
 } from "../types";
 
 export type ToastTone = "neutral" | "success" | "warning" | "danger";
+const activeOnlineDownloads = new Set<string>();
 
 export interface ToastMessage {
   id: number;
@@ -107,6 +109,11 @@ interface KomaState {
   setCompleted: (item: LibraryItem, completed: boolean) => Promise<void>;
   removeItem: (item: LibraryItem) => Promise<void>;
   revealItem: (item: LibraryItem) => Promise<void>;
+  downloadOnline: (item: LibraryItem, options?: ImportOptions) => Promise<void>;
+  navigateOnline: (
+    targetScope: "chapter" | "volume",
+    targetId: number,
+  ) => Promise<boolean>;
   relinkItem: (item: LibraryItem) => Promise<void>;
   openBook: (item: LibraryItem) => Promise<void>;
   closeReader: () => void;
@@ -174,7 +181,11 @@ function replaceItem(items: LibraryItem[], next: LibraryItem): LibraryItem[] {
   return items.map((item) => (item.id === next.id ? next : item));
 }
 
-function mergeItem(items: LibraryItem[], id: string, patch: Partial<LibraryItem>) {
+function mergeItem(
+  items: LibraryItem[],
+  id: string,
+  patch: Partial<LibraryItem>,
+) {
   return items.map((item) => (item.id === id ? { ...item, ...patch } : item));
 }
 
@@ -465,10 +476,7 @@ export const useKomaStore = create<KomaState>((set, get) => ({
         : await backend.pickFolder();
       if (path === null) {
         if (backend.kind === "preview") {
-          get().notify(
-            tr("Folder scan"),
-            tr("Available in the desktop app."),
-          );
+          get().notify(tr("Folder scan"), tr("Available in the desktop app."));
         }
         return;
       }
@@ -504,7 +512,11 @@ export const useKomaStore = create<KomaState>((set, get) => ({
     try {
       set({ libraryFolders: await backend.listLibraryFolders() });
     } catch (error) {
-      get().notify(tr("Folder list could not be loaded"), errorMessage(error), "warning");
+      get().notify(
+        tr("Folder list could not be loaded"),
+        errorMessage(error),
+        "warning",
+      );
     }
   },
 
@@ -513,18 +525,25 @@ export const useKomaStore = create<KomaState>((set, get) => ({
       const path = await backend.pickFolder();
       if (path === null) {
         if (backend.kind === "preview") {
-          get().notify(tr("Folder picker"), tr("Available in the desktop app."));
+          get().notify(
+            tr("Folder picker"),
+            tr("Available in the desktop app."),
+          );
         }
         return;
       }
       get().notify(tr("Scanning folder"), path);
       const result = await backend.addLibraryFolder(path, 60);
       set((state) => {
-        const importedIds = new Set(result.report.imported.map((item) => item.id));
+        const importedIds = new Set(
+          result.report.imported.map((item) => item.id),
+        );
         return {
           libraryFolders: [
             result.folder,
-            ...state.libraryFolders.filter((folder) => folder.id !== result.folder.id),
+            ...state.libraryFolders.filter(
+              (folder) => folder.id !== result.folder.id,
+            ),
           ],
           items: [
             ...result.report.imported,
@@ -540,7 +559,11 @@ export const useKomaStore = create<KomaState>((set, get) => ({
         result.report.failures.length > 0 ? "warning" : "success",
       );
     } catch (error) {
-      get().notify(tr("Folder could not be added"), errorMessage(error), "danger");
+      get().notify(
+        tr("Folder could not be added"),
+        errorMessage(error),
+        "danger",
+      );
     }
   },
 
@@ -569,7 +592,11 @@ export const useKomaStore = create<KomaState>((set, get) => ({
           candidate.id === folder.id ? previous : candidate,
         ),
       }));
-      get().notify(tr("Folder setting was not saved"), errorMessage(error), "danger");
+      get().notify(
+        tr("Folder setting was not saved"),
+        errorMessage(error),
+        "danger",
+      );
     }
   },
 
@@ -581,16 +608,26 @@ export const useKomaStore = create<KomaState>((set, get) => ({
           (candidate) => candidate.id !== folder.id,
         ),
       }));
-      get().notify(tr("Folder removed"), tr("Library entries were kept."), "success");
+      get().notify(
+        tr("Folder removed"),
+        tr("Library entries were kept."),
+        "success",
+      );
     } catch (error) {
-      get().notify(tr("Folder could not be removed"), errorMessage(error), "danger");
+      get().notify(
+        tr("Folder could not be removed"),
+        errorMessage(error),
+        "danger",
+      );
     }
   },
 
   scanManagedFolder: async (folder) => {
     try {
       const result = await backend.scanLibraryFolder(folder.id);
-      const importedIds = new Set(result.report.imported.map((item) => item.id));
+      const importedIds = new Set(
+        result.report.imported.map((item) => item.id),
+      );
       set((state) => ({
         libraryFolders: state.libraryFolders.map((candidate) =>
           candidate.id === folder.id ? result.folder : candidate,
@@ -668,10 +705,14 @@ export const useKomaStore = create<KomaState>((set, get) => ({
         )}${localNetwork}${codeWarning}`,
       );
       if (!accepted) return;
-      const connector = await backend.installConnectorPackage(preview.installToken);
+      const connector = await backend.installConnectorPackage(
+        preview.installToken,
+      );
       set((state) => ({
         connectors: [
-          ...state.connectors.filter((candidate) => candidate.id !== connector.id),
+          ...state.connectors.filter(
+            (candidate) => candidate.id !== connector.id,
+          ),
           connector,
         ].sort((left, right) => left.name.localeCompare(right.name)),
       }));
@@ -831,6 +872,79 @@ export const useKomaStore = create<KomaState>((set, get) => ({
     }
   },
 
+  downloadOnline: async (item, options) => {
+    if (item.format !== "online" || activeOnlineDownloads.has(item.id)) return;
+    activeOnlineDownloads.add(item.id);
+    get().notify(
+      tr("Download continues in the background"),
+      tr("Koma will notify you when it is ready."),
+    );
+    try {
+      const result = await backend.downloadOnlinePublication(item.id, options);
+      set((state) => ({
+        items: replaceItem(state.items, result.item),
+      }));
+      const currentReader = get().reader;
+      if (currentReader?.payload.libraryId === item.id) {
+        const payload = await backend.openReader(item.id);
+        set((state) => ({
+          reader:
+            state.reader?.payload.libraryId === item.id
+              ? { ...state.reader, payload, sourceUrl: null }
+              : state.reader,
+        }));
+      }
+      get().notify(
+        tr("Downloaded to library"),
+        tr("Your reading position was kept."),
+        "success",
+      );
+    } catch (error) {
+      if (errorCode(error) === "cancelled") {
+        get().notify(tr("Download cancelled"), item.title);
+      } else {
+        get().notify(tr("Download failed"), errorMessage(error), "danger");
+      }
+    } finally {
+      activeOnlineDownloads.delete(item.id);
+    }
+  },
+
+  navigateOnline: async (targetScope, targetId) => {
+    const reader = get().reader;
+    if (reader?.payload.onlineSource == null) return false;
+    try {
+      const result = await backend.navigateOnlinePublication(
+        reader.payload.libraryId,
+        targetScope,
+        targetId,
+      );
+      const page = await backend.readPage(reader.payload.libraryId, 0);
+      set((state) => ({
+        items: replaceItem(state.items, result.item),
+        reader:
+          state.reader?.payload.libraryId === reader.payload.libraryId
+            ? {
+                ...state.reader,
+                payload: result.reader,
+                currentPage: 0,
+                pageUrls: { 0: page.dataUrl },
+                loadingPages: [],
+                bookmarks: result.reader.bookmarks,
+                error: null,
+                zoom: 1,
+              }
+            : state.reader,
+      }));
+      const next = result.reader.manifest.pages.length > 1 ? 1 : null;
+      if (next !== null) void get().loadPage(next);
+      return true;
+    } catch (error) {
+      get().notify(tr("Could not open section"), errorMessage(error), "danger");
+      return false;
+    }
+  },
+
   relinkItem: async (item) => {
     try {
       const path = await backend.pickRelinkSource();
@@ -847,11 +961,7 @@ export const useKomaStore = create<KomaState>((set, get) => ({
             items: replaceItem(state.items, relinked),
             selectedId: relinked.id,
           }));
-          get().notify(
-            tr("Source relinked"),
-            item.title,
-            "success",
-          );
+          get().notify(tr("Source relinked"), item.title, "success");
           return;
         } catch (error) {
           if (errorCode(error) !== "password_required") throw error;
@@ -899,8 +1009,7 @@ export const useKomaStore = create<KomaState>((set, get) => ({
         sourceUrl === null
           ? await backend.readPage(item.id, currentPage)
           : await renderPdfPage(sourceUrl, currentPage, password);
-      const settings =
-        payload.readingState?.settings ??
+      const settings = payload.readingState?.settings ??
         get().bootstrap?.defaultReaderSettings ?? {
           mode: "singlePage",
           direction: "automatic",
@@ -1065,7 +1174,8 @@ export const useKomaStore = create<KomaState>((set, get) => ({
 
   setReaderControls: (visible) => {
     const reader = get().reader;
-    if (reader !== null) set({ reader: { ...reader, controlsVisible: visible } });
+    if (reader !== null)
+      set({ reader: { ...reader, controlsVisible: visible } });
   },
 
   setReaderSettingsOpen: (open) => {
@@ -1235,7 +1345,10 @@ export const useKomaStore = create<KomaState>((set, get) => ({
 
   addImportedItem: (item) => {
     set((state) => ({
-      items: [item, ...state.items.filter((candidate) => candidate.id !== item.id)],
+      items: [
+        item,
+        ...state.items.filter((candidate) => candidate.id !== item.id),
+      ],
       selectedId: item.id,
       route: "library",
     }));
@@ -1280,7 +1393,9 @@ export const useKomaStore = create<KomaState>((set, get) => ({
       }
       if (
         !window.confirm(
-          tr("Merge this backup into Koma? Current library entries will be kept."),
+          tr(
+            "Merge this backup into Koma? Current library entries will be kept.",
+          ),
         )
       ) {
         return;

@@ -14,6 +14,7 @@ pub enum PublicationFormat {
     Folder,
     Pdf,
     FixedLayoutEpub,
+    Online,
 }
 
 impl PublicationFormat {

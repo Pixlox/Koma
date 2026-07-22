@@ -5,9 +5,12 @@ import {
   Bookmark,
   ChevronDown,
   ChevronLeft,
+  ChevronRight,
   Columns2,
+  Download,
   Focus,
   Image as ImageIcon,
+  LoaderCircle,
   Maximize2,
   MonitorPlay,
   Moon,
@@ -36,8 +39,12 @@ import {
 import { tr } from "../i18n";
 import { backend } from "../lib/backend";
 import { useKomaStore } from "../store/koma";
+import { ResizeHandle } from "./ResizeHandle";
 import type {
   Bookmark as BookmarkRecord,
+  ChapterRange,
+  ImportOptions,
+  RemotePublication,
   FitMode,
   PageDescriptor,
   ReaderMode,
@@ -64,6 +71,39 @@ function isWidePage(page: PageDescriptor): boolean {
     page.width !== null &&
     page.height !== null &&
     page.width > page.height * 1.15
+  );
+}
+
+function ChapterNavigation({
+  chapters,
+  currentIndex,
+  visible,
+  onChapter,
+}: {
+  chapters: ChapterRange[];
+  currentIndex: number;
+  visible: boolean;
+  onChapter: (index: number) => void;
+}) {
+  return (
+    <label
+      className={`reader-chapter-select${visible ? " is-visible" : ""}`}
+    >
+      <span className="sr-only">{tr("Chapter")}</span>
+      <select
+        value={Math.max(0, currentIndex)}
+        onChange={(event) => onChapter(Number(event.target.value))}
+        aria-label={tr("Choose chapter")}
+      >
+        {chapters.map((chapter, index) => (
+          <option key={`${chapter.id ?? chapter.number}-${index}`} value={index}>
+            {tr("Chapter {{number}}", { number: chapter.number })}
+            {chapter.title === null ? "" : ` · ${chapter.title}`}
+          </option>
+        ))}
+      </select>
+      <ChevronDown size={14} aria-hidden="true" />
+    </label>
   );
 }
 
@@ -123,6 +163,9 @@ export function Reader() {
   const saveAnnotation = useKomaStore((state) => state.saveReaderAnnotation);
   const removeBookmark = useKomaStore((state) => state.removeReaderBookmark);
   const notify = useKomaStore((state) => state.notify);
+  const downloadOnline = useKomaStore((state) => state.downloadOnline);
+  const navigateOnline = useKomaStore((state) => state.navigateOnline);
+  const libraryItems = useKomaStore((state) => state.items);
   const platform = useKomaStore((state) => state.bootstrap?.platform);
   const mobile = platform === "ios" || platform === "android";
   const hideTimer = useRef<number | null>(null);
@@ -147,6 +190,8 @@ export function Reader() {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [fullscreen, setFullscreen] = useState(false);
   const [compactPhone, setCompactPhone] = useState(compactPhoneViewport);
+  const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
+  const [sectionLoading, setSectionLoading] = useState(false);
 
   const manifest = reader?.payload.manifest ?? null;
   const pageCount = manifest?.pages.length ?? 0;
@@ -159,16 +204,59 @@ export function Reader() {
         currentPage >= chapter.startPageIndex &&
         currentPage <= chapter.endPageIndex,
     ) ?? null;
+  const currentChapterIndex =
+    currentChapter === null || manifest === null
+      ? -1
+      : manifest.chapters.indexOf(currentChapter);
+  const currentItem = libraryItems.find((item) => item.id === readerId) ?? null;
   const readerMode =
     compactPhone && reader?.settings.mode === "spreads"
       ? "singlePage"
       : reader?.settings.mode;
+  const onlineSource = reader?.payload.onlineSource ?? null;
+  const onlineSectionKind: "chapter" | "volume" =
+    onlineSource?.scope === "volume" ||
+    (onlineSource?.scope === "series" && onlineSource.chapterCatalog.length === 0)
+      ? "volume"
+      : "chapter";
+  const onlineSections =
+    onlineSectionKind === "chapter"
+      ? (onlineSource?.chapterCatalog ?? [])
+      : (onlineSource?.volumeCatalog ?? []);
+  const activeOnlineSectionId =
+    onlineSectionKind === "chapter"
+      ? onlineSource?.chapterId
+      : onlineSource?.volumeId;
+  const activeOnlineSectionIndex = onlineSections.findIndex(
+    (section) => section.id === activeOnlineSectionId,
+  );
+  const visibleSpread =
+    readerMode === "spreads" && manifest !== null && currentPage !== undefined
+      ? spreadGroups(manifest.pages)[
+          spreadIndexForPage(spreadGroups(manifest.pages), currentPage)
+        ] ?? [currentPage]
+      : currentPage === undefined
+        ? []
+        : [currentPage];
+  const firstVisiblePage = visibleSpread[0] ?? currentPage ?? 0;
+  const lastVisiblePage = visibleSpread.at(-1) ?? currentPage ?? 0;
   const keepAwake = reader?.settings.keepAwake ?? false;
   const direction =
     reader === null || manifest === null
       ? "leftToRight"
       : resolvedDirection(reader.settings.direction, manifest.metadata.direction);
   const isRtl = direction === "rightToLeft";
+
+  const openOnlineSection = async (index: number) => {
+    const target = onlineSections[index];
+    if (target === undefined || sectionLoading) return;
+    setSectionLoading(true);
+    try {
+      await navigateOnline(onlineSectionKind, target.id);
+    } finally {
+      setSectionLoading(false);
+    }
+  };
 
   const previous = () => {
     if (reader === null) return;
@@ -406,7 +494,9 @@ export function Reader() {
       if (
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement
+        target instanceof HTMLSelectElement ||
+        (target instanceof Element &&
+          target.closest("[role=slider], .slider-root, .reader-page-slider") !== null)
       ) {
         return;
       }
@@ -719,6 +809,14 @@ export function Reader() {
         settingsOpen={reader.settingsOpen}
         controlsVisible={reader.controlsVisible}
         fullscreen={fullscreen}
+        online={manifest.format === "online"}
+        onDownload={() => {
+          if (reader.payload.onlineSource == null && currentItem !== null) {
+            void downloadOnline(currentItem);
+          } else {
+            setDownloadMenuOpen((open) => !open);
+          }
+        }}
         onClose={() => {
           if (fullscreen) {
             void setReaderFullscreen(false).finally(closeReader);
@@ -762,6 +860,65 @@ export function Reader() {
         }}
       />
 
+      {downloadMenuOpen &&
+        currentItem !== null &&
+        reader.payload.onlineSource != null && (
+          <DownloadScopeMenu
+            source={reader.payload.onlineSource}
+            currentChapterIndex={currentChapterIndex}
+            destination={
+              useKomaStore.getState().bootstrap?.defaultImportDirectory ?? ""
+            }
+            onClose={() => setDownloadMenuOpen(false)}
+            onDownload={(options) => {
+              setDownloadMenuOpen(false);
+              void downloadOnline(currentItem, options);
+            }}
+          />
+        )}
+
+      {onlineSections.length > 1 && activeOnlineSectionIndex >= 0 && (
+        <label
+          className={`reader-chapter-select${reader.controlsVisible ? " is-visible" : ""}`}
+        >
+          <span className="sr-only">
+            {tr(onlineSectionKind === "chapter" ? "Choose chapter" : "Choose volume")}
+          </span>
+          <select
+            value={activeOnlineSectionIndex}
+            disabled={sectionLoading}
+            onChange={(event) => void openOnlineSection(Number(event.target.value))}
+            aria-label={tr(
+              onlineSectionKind === "chapter" ? "Choose chapter" : "Choose volume",
+            )}
+          >
+            {onlineSections.map((section, index) => (
+              <option key={section.id} value={index}>
+                {tr(onlineSectionKind === "chapter" ? "Chapter" : "Volume")} {section.number}
+                {section.title === null ? "" : ` · ${section.title}`}
+              </option>
+            ))}
+          </select>
+          {sectionLoading ? (
+            <LoaderCircle className="spin" size={14} aria-hidden="true" />
+          ) : (
+            <ChevronDown size={14} aria-hidden="true" />
+          )}
+        </label>
+      )}
+
+      {onlineSections.length === 0 && manifest.chapters.length > 1 && (
+        <ChapterNavigation
+          chapters={manifest.chapters}
+          currentIndex={currentChapterIndex}
+          visible={reader.controlsVisible}
+          onChapter={(index) => {
+            const chapter = manifest.chapters[index];
+            if (chapter !== undefined) void goToPage(chapter.startPageIndex);
+          }}
+        />
+      )}
+
       <div className="reader-stage" ref={stageRef}>
         {readerMode === "guided" ? (
           <GuidedCanvas
@@ -803,18 +960,113 @@ export function Reader() {
         )}
       </div>
 
+      {onlineSections.length > 1 && activeOnlineSectionIndex >= 0 && (
+        <div className="chapter-boundaries" aria-live="polite">
+          {firstVisiblePage === 0 && activeOnlineSectionIndex > 0 && (
+            <button
+              type="button"
+              disabled={sectionLoading}
+              onClick={() => void openOnlineSection(activeOnlineSectionIndex - 1)}
+            >
+              {sectionLoading ? <LoaderCircle className="spin" size={18} /> : <ChevronLeft size={18} />}
+              <span>
+                <small>
+                  {tr(
+                    onlineSectionKind === "chapter"
+                      ? "Previous chapter"
+                      : "Previous volume",
+                  )}
+                </small>
+                <strong>
+                  {tr(onlineSectionKind === "chapter" ? "Chapter" : "Volume")} {onlineSections[activeOnlineSectionIndex - 1]?.number ?? ""}
+                </strong>
+              </span>
+            </button>
+          )}
+          {lastVisiblePage === pageCount - 1 &&
+            activeOnlineSectionIndex < onlineSections.length - 1 && (
+              <button
+                type="button"
+                disabled={sectionLoading}
+                onClick={() => void openOnlineSection(activeOnlineSectionIndex + 1)}
+              >
+                <span>
+                  <small>
+                    {tr(
+                      onlineSectionKind === "chapter"
+                        ? "Next chapter"
+                        : "Next volume",
+                    )}
+                  </small>
+                  <strong>
+                    {tr(onlineSectionKind === "chapter" ? "Chapter" : "Volume")} {onlineSections[activeOnlineSectionIndex + 1]?.number ?? ""}
+                  </strong>
+                </span>
+                {sectionLoading ? <LoaderCircle className="spin" size={18} /> : <ChevronRight size={18} />}
+              </button>
+            )}
+        </div>
+      )}
+
+      {onlineSections.length === 0 && currentChapter !== null && manifest.chapters.length > 1 && (
+        <div className="chapter-boundaries" aria-live="polite">
+          {reader.currentPage === currentChapter.startPageIndex &&
+            currentChapterIndex > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const chapter = manifest.chapters[currentChapterIndex - 1];
+                  if (chapter !== undefined) void goToPage(chapter.startPageIndex);
+                }}
+              >
+                <ChevronLeft size={18} />
+                <span>
+                  <small>{tr("Previous chapter")}</small>
+                  <strong>
+                    {tr("Chapter {{number}}", {
+                      number: manifest.chapters[currentChapterIndex - 1]?.number ?? "",
+                    })}
+                  </strong>
+                </span>
+              </button>
+            )}
+          {reader.currentPage === currentChapter.endPageIndex &&
+            currentChapterIndex < manifest.chapters.length - 1 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const chapter = manifest.chapters[currentChapterIndex + 1];
+                  if (chapter !== undefined) void goToPage(chapter.startPageIndex);
+                }}
+              >
+                <span>
+                  <small>{tr("Next chapter")}</small>
+                  <strong>
+                    {tr("Chapter {{number}}", {
+                      number: manifest.chapters[currentChapterIndex + 1]?.number ?? "",
+                    })}
+                  </strong>
+                </span>
+                <ChevronRight size={18} />
+              </button>
+            )}
+        </div>
+      )}
+
       {reader.settings.showPageNumber &&
         readerMode !== "continuous" &&
         readerMode !== "webtoon" && (
           <div className="reader-page-number" aria-live="polite">
             {currentChapter !== null &&
               `${tr("Chapter {{number}}", { number: currentChapter.number })} · `}
-            {reader.currentPage + 1} / {pageCount}
+            {readerMode === "spreads" && firstVisiblePage !== lastVisiblePage
+              ? `${firstVisiblePage + 1}–${lastVisiblePage + 1}`
+              : lastVisiblePage + 1} / {pageCount}
           </div>
         )}
 
       <ReaderScrubber
-        currentPage={reader.currentPage}
+        currentPage={lastVisiblePage}
         pageCount={pageCount}
         isRtl={isRtl}
         bookmarked={isBookmarked}
@@ -828,7 +1080,7 @@ export function Reader() {
       <div className="reader-immersive-progress" aria-hidden="true">
         <span
           style={{
-            width: `${pageCount <= 1 ? 100 : (reader.currentPage / (pageCount - 1)) * 100}%`,
+            width: `${pageCount <= 1 ? 100 : (lastVisiblePage / (pageCount - 1)) * 100}%`,
           }}
         />
       </div>
@@ -862,6 +1114,77 @@ export function Reader() {
   );
 }
 
+function DownloadScopeMenu({
+  source,
+  currentChapterIndex,
+  destination,
+  onClose,
+  onDownload,
+}: {
+  source: RemotePublication;
+  currentChapterIndex: number;
+  destination: string;
+  onClose: () => void;
+  onDownload: (options?: ImportOptions) => void;
+}) {
+  const base = (scope: ImportOptions["scope"]): ImportOptions => ({
+    destinationDirectory: destination,
+    volumeId: source.volumeId,
+    chapterId: source.chapterId,
+    selectedChapterIds: [],
+    scope,
+    preferredLanguage: source.language,
+    overwriteExisting: false,
+    downloadConcurrency: 6,
+  });
+  const chapter = source.chapters[currentChapterIndex];
+  const chapterId = chapter?.id === null ? null : Number(chapter?.id);
+  return (
+    <div className="reader-download-menu" role="dialog" aria-label={tr("Download to library")}>
+      <div>
+        <strong>{tr("Download to library")}</strong>
+        <button type="button" className="icon-button" onClick={onClose} aria-label={tr("Close")}>
+          <X size={15} />
+        </button>
+      </div>
+      <button type="button" onClick={() => onDownload(undefined)}>
+        <span>{tr("Original selection")}</span>
+        <small>
+          {source.scope === "chapter"
+            ? tr("Chapter")
+            : source.scope === "volume"
+              ? tr("Volume")
+              : tr("Entire series")}
+        </small>
+      </button>
+      {Number.isSafeInteger(chapterId) && chapterId !== null && (
+        <button
+          type="button"
+          onClick={() =>
+            onDownload({
+              ...base("chapter"),
+              chapterId,
+              volumeId: null,
+            })
+          }
+        >
+          <span>{tr("Current chapter")}</span>
+          <small>{tr("Chapter {{number}}", { number: chapter?.number ?? "" })}</small>
+        </button>
+      )}
+      {source.scope !== "series" && (
+        <button
+          type="button"
+          onClick={() => onDownload(base("series"))}
+        >
+          <span>{tr("Entire series")}</span>
+          <small>{tr("Earliest to latest")}</small>
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ReaderToolbar({
   title,
   series,
@@ -869,6 +1192,8 @@ function ReaderToolbar({
   settingsOpen,
   controlsVisible,
   fullscreen,
+  online,
+  onDownload,
   onClose,
   onSettings,
   onMode,
@@ -880,6 +1205,8 @@ function ReaderToolbar({
   settingsOpen: boolean;
   controlsVisible: boolean;
   fullscreen: boolean;
+  online: boolean;
+  onDownload: () => void;
   onClose: () => void;
   onSettings: () => void;
   onMode: (mode: ReaderMode) => void;
@@ -930,6 +1257,18 @@ function ReaderToolbar({
         <ChevronDown size={14} aria-hidden="true" />
       </label>
       <div className="reader-toolbar-actions">
+        {online && (
+          <button
+            type="button"
+            className="reader-download-button"
+            onClick={onDownload}
+            aria-label={tr("Download to library")}
+            title={tr("Download to library")}
+          >
+            <Download size={17} />
+            <span>{tr("Download")}</span>
+          </button>
+        )}
         {!mobile && (
           <button
             type="button"
@@ -1412,6 +1751,15 @@ function ReaderSettingsPanel({
       aria-hidden={!open}
       inert={!open}
     >
+      <ResizeHandle
+        variable="--reader-settings-width"
+        storageKey="koma.panel.readerSettings"
+        min={280}
+        max={520}
+        defaultValue={326}
+        edge="left"
+        label="Resize reader settings"
+      />
       <div className="reader-settings-header">
         <div>
           <h2>{tr("Reader settings")}</h2>

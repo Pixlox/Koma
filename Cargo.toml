@@ -44,6 +44,7 @@ regex = "1.11"
 rhai = { version = "1.23", features = ["serde", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = [
   "brotli",
+  "blocking",
   "charset",
   "deflate",
   "gzip",

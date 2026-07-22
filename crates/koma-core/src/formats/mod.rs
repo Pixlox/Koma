@@ -75,6 +75,9 @@ pub fn open_publication(
         Some(PublicationFormat::Folder) => Ok(Box::new(FolderPublication::open(path)?)),
         Some(PublicationFormat::FixedLayoutEpub) => Ok(Box::new(ZipPublication::open_epub(path)?)),
         Some(PublicationFormat::Pdf) => Ok(Box::new(PdfPublication::open(path, password)?)),
+        Some(PublicationFormat::Online) => Err(KomaError::UnsupportedFormat(
+            "online publications are opened through their connector".to_owned(),
+        )),
         None => Err(KomaError::UnsupportedFormat(
             path.extension()
                 .and_then(|extension| extension.to_str())

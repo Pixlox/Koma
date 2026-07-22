@@ -2,6 +2,7 @@ import {
   Check,
   Clipboard,
   Download,
+  BookOpen,
   FolderOpen,
   LoaderCircle,
   LockKeyhole,
@@ -20,6 +21,7 @@ import {
 } from "../lib/backend";
 import { useKomaStore } from "../store/koma";
 import type { ImportEvent, ImportPreview } from "../types";
+import { ResizeHandle } from "./ResizeHandle";
 
 type ImportPhase =
   | "idle"
@@ -53,6 +55,7 @@ export function ImportPanel() {
   const setOpen = useKomaStore((state) => state.setImportOpen);
   const bootstrap = useKomaStore((state) => state.bootstrap);
   const addImportedItem = useKomaStore((state) => state.addImportedItem);
+  const openBook = useKomaStore((state) => state.openBook);
   const notify = useKomaStore((state) => state.notify);
   const [source, setSource] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -66,6 +69,7 @@ export function ImportPanel() {
     bootstrap?.defaultImportDirectory ?? "~/Downloads/Koma",
   );
   const [confirmed, setConfirmed] = useState(false);
+  const [readingOnline, setReadingOnline] = useState(false);
   const [phase, setPhase] = useState<ImportPhase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState>({
@@ -85,56 +89,58 @@ export function ImportPanel() {
   useEffect(() => {
     let active = true;
     let removeListener: (() => void) | null = null;
-    void backend.onImportEvent((event: ImportEvent) => {
-      if (!active) return;
-      if (event.kind === "checking") {
-        setPhase("checking");
-        setProgress({ completed: 0, total: 0, label: tr("Checking link…") });
-      } else if (event.kind === "eligible") {
-        setProgress({ completed: 0, total: 0, label: tr("Link ready") });
-      } else if (event.kind === "discovered") {
-        setProgress({
-          completed: 0,
-          total: event.pageCount,
-          label: tr("Preparing {{count}} pages", { count: event.pageCount }),
-        });
-      } else if (event.kind === "downloading") {
-        setPhase("downloading");
-        setProgress({
-          completed: event.completed,
-          total: event.total,
-          label: tr("Downloading page {{current}} of {{total}}", {
-            current: event.completed,
+    void backend
+      .onImportEvent((event: ImportEvent) => {
+        if (!active) return;
+        if (event.kind === "checking") {
+          setPhase("checking");
+          setProgress({ completed: 0, total: 0, label: tr("Checking link…") });
+        } else if (event.kind === "eligible") {
+          setProgress({ completed: 0, total: 0, label: tr("Link ready") });
+        } else if (event.kind === "discovered") {
+          setProgress({
+            completed: 0,
+            total: event.pageCount,
+            label: tr("Preparing {{count}} pages", { count: event.pageCount }),
+          });
+        } else if (event.kind === "downloading") {
+          setPhase("downloading");
+          setProgress({
+            completed: event.completed,
             total: event.total,
-          }),
-        });
-      } else if (event.kind === "recovering") {
-        setPhase("downloading");
-        setProgress((current) => ({
-          ...current,
-          label: tr("Recovering {{count}} pages", {
-            count: event.failedPages,
-          }),
-        }));
-      } else if (event.kind === "packaging") {
-        setPhase("packaging");
-        setProgress((current) => ({
-          completed: current.total,
-          total: current.total,
-          label: tr("Packaging CBZ…"),
-        }));
-      } else {
-        setPhase("complete");
-        setProgress({
-          completed: event.receipt.pageCount,
-          total: event.receipt.pageCount,
-          label: tr("Ready"),
-        });
-      }
-    }).then((unlisten) => {
-      if (active) removeListener = unlisten;
-      else unlisten();
-    });
+            label: tr("Downloading page {{current}} of {{total}}", {
+              current: event.completed,
+              total: event.total,
+            }),
+          });
+        } else if (event.kind === "recovering") {
+          setPhase("downloading");
+          setProgress((current) => ({
+            ...current,
+            label: tr("Recovering {{count}} pages", {
+              count: event.failedPages,
+            }),
+          }));
+        } else if (event.kind === "packaging") {
+          setPhase("packaging");
+          setProgress((current) => ({
+            completed: current.total,
+            total: current.total,
+            label: tr("Packaging CBZ…"),
+          }));
+        } else {
+          setPhase("complete");
+          setProgress({
+            completed: event.receipt.pageCount,
+            total: event.receipt.pageCount,
+            label: tr("Ready"),
+          });
+        }
+      })
+      .then((unlisten) => {
+        if (active) removeListener = unlisten;
+        else unlisten();
+      });
     return () => {
       active = false;
       removeListener?.();
@@ -147,13 +153,17 @@ export function ImportPanel() {
   }, [progress]);
   const seriesChapters = useMemo(() => {
     if (preview === null) return [];
-    const language =
-      preview.volumes.find((volume) => volume.id === selectedVolume)?.language ??
-      preview.chapters.find((chapter) => chapter.id === selectedChapter)?.language;
+    const language = preview.chapters.find(
+      (chapter) => chapter.id === selectedChapter,
+    )?.language;
     return language === undefined
       ? preview.chapters
       : preview.chapters.filter((chapter) => chapter.language === language);
-  }, [preview, selectedChapter, selectedVolume]);
+  }, [preview, selectedChapter]);
+  const seriesUsesVolumes =
+    preview !== null &&
+    preview.chapters.length === 0 &&
+    preview.volumes.length > 0;
 
   const resetPreview = (value: string) => {
     setSource(value);
@@ -196,12 +206,8 @@ export function ImportPanel() {
           : result.chapters.filter(
               (chapter) => chapter.language === selectedLanguage,
             );
-      setSelectedSeriesChapters(
-        new Set(chapters.map((chapter) => chapter.id)),
-      );
-      setScope(
-        result.availableScopes.includes("volume") ? "volume" : "series",
-      );
+      setSelectedSeriesChapters(new Set(chapters.map((chapter) => chapter.id)));
+      setScope(result.availableScopes.includes("volume") ? "volume" : "series");
       setPhase("ready");
       setProgress({
         completed: 0,
@@ -246,22 +252,25 @@ export function ImportPanel() {
       (scope === "volume" && selectedVolume === null) ||
       (scope === "chapter" && selectedChapter === null) ||
       !confirmed
-    ) return;
+    )
+      return;
     setPhase("checking");
     setError(null);
     const options = {
       destinationDirectory: destination,
-      volumeId: selectedVolume,
-      chapterId: selectedChapter,
-      selectedChapterIds:
-        scope === "series" ? [...selectedSeriesChapters] : [],
+      volumeId: scope === "volume" ? selectedVolume : null,
+      chapterId: scope === "chapter" ? selectedChapter : null,
+      selectedChapterIds: scope === "series" ? [...selectedSeriesChapters] : [],
       scope,
       preferredLanguage:
-        (scope === "chapter"
-          ? preview.chapters.find((chapter) => chapter.id === selectedChapter)
+        (scope === "volume"
+          ? preview.volumes.find((volume) => volume.id === selectedVolume)
               ?.language
-          : preview.volumes.find((volume) => volume.id === selectedVolume)
-              ?.language) ?? "en",
+          : preview.chapters.find((chapter) => chapter.id === selectedChapter)
+              ?.language ?? preview.chapters[0]?.language) ??
+        preview.volumes.find((volume) => volume.id === selectedVolume)
+          ?.language ??
+        "en",
       overwriteExisting: false,
       downloadConcurrency: 6,
     };
@@ -286,6 +295,13 @@ export function ImportPanel() {
       } catch (caught) {
         const code = errorCode(caught);
         const message = errorMessage(caught);
+        if (code === "cancelled") {
+          setPhase("ready");
+          setError(null);
+          setProgress({ completed: 0, total: 0, label: tr("Ready") });
+          notify(tr("Download cancelled"));
+          return;
+        }
         const networkFailure =
           code === "provider_unavailable" ||
           message.toLowerCase().includes("network error") ||
@@ -294,7 +310,9 @@ export function ImportPanel() {
           setPhase("error");
           setError(
             networkFailure
-              ? tr("Download paused. Check your connection, then try again to continue.")
+              ? tr(
+                  "Download paused. Check your connection, then try again to continue.",
+                )
               : message,
           );
           if (!useKomaStore.getState().importOpen) {
@@ -312,6 +330,44 @@ export function ImportPanel() {
           window.setTimeout(resolve, Math.min(30_000, retry * 5_000)),
         );
       }
+    }
+  };
+
+  const importOptions = () => ({
+    destinationDirectory: destination,
+    volumeId: scope === "volume" ? selectedVolume : null,
+    chapterId: scope === "chapter" ? selectedChapter : null,
+    selectedChapterIds: scope === "series" ? [...selectedSeriesChapters] : [],
+    scope,
+    preferredLanguage:
+      (scope === "volume"
+        ? preview?.volumes.find((volume) => volume.id === selectedVolume)
+            ?.language
+        : preview?.chapters.find((chapter) => chapter.id === selectedChapter)
+            ?.language ?? preview?.chapters[0]?.language) ??
+      preview?.volumes.find((volume) => volume.id === selectedVolume)
+        ?.language ??
+      "en",
+    overwriteExisting: false,
+    downloadConcurrency: 6,
+  });
+
+  const readOnline = async () => {
+    if (preview === null || !confirmed) return;
+    setReadingOnline(true);
+    setPhase("checking");
+    setError(null);
+    try {
+      const item = await backend.readLinkOnline(source.trim(), importOptions());
+      addImportedItem(item);
+      setOpen(false);
+      resetPreview("");
+      await openBook(item);
+    } catch (caught) {
+      setPhase("error");
+      setError(errorMessage(caught));
+    } finally {
+      setReadingOnline(false);
     }
   };
 
@@ -343,6 +399,15 @@ export function ImportPanel() {
         aria-label={tr("Import from link")}
         aria-hidden={!open}
       >
+        <ResizeHandle
+          variable="--import-panel-width"
+          storageKey="koma.panel.import"
+          min={360}
+          max={640}
+          defaultValue={430}
+          edge="left"
+          label="Resize importer"
+        />
         <div className="drawer-header">
           <div>
             <h2>{tr("Import from link")}</h2>
@@ -472,9 +537,17 @@ export function ImportPanel() {
                   <div className="series-import-summary">
                     <strong>{tr("Earliest to latest")}</strong>
                     <span>
-                      {tr("{{count}} chapters", {
-                        count: preview.seriesChapterCount ?? preview.chapters.length,
-                      })}
+                      {tr(
+                        seriesUsesVolumes
+                          ? "{{count}} volumes"
+                          : "{{count}} chapters",
+                        {
+                          count: seriesUsesVolumes
+                            ? preview.volumes.length
+                            : (preview.seriesChapterCount ??
+                              preview.chapters.length),
+                        },
+                      )}
                     </span>
                     <small>
                       {preview.seriesPageCount === null
@@ -484,57 +557,65 @@ export function ImportPanel() {
                           })}
                     </small>
                   </div>
-                  <fieldset className="series-chapter-picker">
-                    <div className="series-chapter-heading">
-                      <legend>
-                        {tr("{{count}} chapters selected", {
-                          count: selectedSeriesChapters.size,
-                        })}
-                      </legend>
-                      <button
-                        type="button"
-                        className="text-button"
-                        onClick={() => {
-                          setSelectedSeriesChapters(
-                            selectedSeriesChapters.size === seriesChapters.length
-                              ? new Set()
-                              : new Set(seriesChapters.map((chapter) => chapter.id)),
-                          );
-                        }}
-                      >
-                        {selectedSeriesChapters.size === seriesChapters.length
-                          ? tr("Deselect all")
-                          : tr("Select all")}
-                      </button>
-                    </div>
-                    <div className="series-chapter-list">
-                      {seriesChapters.map((chapter) => (
-                        <label key={chapter.id}>
-                          <input
-                            type="checkbox"
-                            checked={selectedSeriesChapters.has(chapter.id)}
-                            onChange={() =>
-                              setSelectedSeriesChapters((current) => {
-                                const next = new Set(current);
-                                if (next.has(chapter.id)) next.delete(chapter.id);
-                                else next.add(chapter.id);
-                                return next;
-                              })
-                            }
-                            disabled={
-                              phase === "downloading" || phase === "packaging"
-                            }
-                          />
-                          <span>
-                            {tr("Chapter {{number}}", {
-                              number: chapter.number,
-                            })}
-                            {chapter.name === null ? "" : ` · ${chapter.name}`}
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                  </fieldset>
+                  {!seriesUsesVolumes && (
+                    <fieldset className="series-chapter-picker">
+                      <div className="series-chapter-heading">
+                        <legend>
+                          {tr("{{count}} chapters selected", {
+                            count: selectedSeriesChapters.size,
+                          })}
+                        </legend>
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => {
+                            setSelectedSeriesChapters(
+                              selectedSeriesChapters.size ===
+                                seriesChapters.length
+                                ? new Set()
+                                : new Set(
+                                    seriesChapters.map((chapter) => chapter.id),
+                                  ),
+                            );
+                          }}
+                        >
+                          {selectedSeriesChapters.size === seriesChapters.length
+                            ? tr("Deselect all")
+                            : tr("Select all")}
+                        </button>
+                      </div>
+                      <div className="series-chapter-list">
+                        {seriesChapters.map((chapter) => (
+                          <label key={chapter.id}>
+                            <input
+                              type="checkbox"
+                              checked={selectedSeriesChapters.has(chapter.id)}
+                              onChange={() =>
+                                setSelectedSeriesChapters((current) => {
+                                  const next = new Set(current);
+                                  if (next.has(chapter.id))
+                                    next.delete(chapter.id);
+                                  else next.add(chapter.id);
+                                  return next;
+                                })
+                              }
+                              disabled={
+                                phase === "downloading" || phase === "packaging"
+                              }
+                            />
+                            <span>
+                              {tr("Chapter {{number}}", {
+                                number: chapter.number,
+                              })}
+                              {chapter.name === null
+                                ? ""
+                                : ` · ${chapter.name}`}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  )}
                 </>
               )}
 
@@ -581,57 +662,66 @@ export function ImportPanel() {
                 </div>
               )}
 
-              {scope === "volume" && <fieldset className="volume-picker">
-                <legend>{tr("Choose volume")}</legend>
-                {preview.volumes.map((volume) => (
-                  <label
-                    className={
-                      selectedVolume === volume.id
-                        ? "volume-option is-selected"
-                        : "volume-option"
-                    }
-                    key={volume.id}
-                  >
-                    <input
-                      type="radio"
-                      name="import-volume"
-                      value={volume.id}
-                      checked={selectedVolume === volume.id}
-                      onChange={() => setSelectedVolume(volume.id)}
-                      disabled={phase === "downloading" || phase === "packaging"}
-                    />
-                    <span className="radio-mark" />
-                    <span>
-                      <strong>
-                        {tr("Volume")} {volume.number} · {languageName(volume.language)}
-                      </strong>
-                      <small>
-                        {volume.pageCount !== null
-                          ? tr("{{count}} pages", { count: volume.pageCount })
-                          : volume.chapterCount !== null
-                            ? tr("{{count}} chapters", { count: volume.chapterCount })
-                            : tr("Page count checked before download")}
-                      </small>
-                    </span>
-                  </label>
-                ))}
-              </fieldset>}
+              {scope === "volume" && (
+                <fieldset className="volume-picker">
+                  <legend>{tr("Choose volume")}</legend>
+                  {preview.volumes.map((volume) => (
+                    <label
+                      className={
+                        selectedVolume === volume.id
+                          ? "volume-option is-selected"
+                          : "volume-option"
+                      }
+                      key={volume.id}
+                    >
+                      <input
+                        type="radio"
+                        name="import-volume"
+                        value={volume.id}
+                        checked={selectedVolume === volume.id}
+                        onChange={() => setSelectedVolume(volume.id)}
+                        disabled={
+                          phase === "downloading" || phase === "packaging"
+                        }
+                      />
+                      <span className="radio-mark" />
+                      <span>
+                        <strong>
+                          {tr("Volume")} {volume.number} ·{" "}
+                          {languageName(volume.language)}
+                        </strong>
+                        <small>
+                          {volume.pageCount !== null
+                            ? tr("{{count}} pages", { count: volume.pageCount })
+                            : volume.chapterCount !== null
+                              ? tr("{{count}} chapters", {
+                                  count: volume.chapterCount,
+                                })
+                              : tr("Page count checked before download")}
+                        </small>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+              )}
 
-              {!mobile && <div className="destination-row">
-                <div>
-                  <span>{tr("Save to")}</span>
-                  <strong title={destination}>{destination}</strong>
+              {!mobile && (
+                <div className="destination-row">
+                  <div>
+                    <span>{tr("Save to")}</span>
+                    <strong title={destination}>{destination}</strong>
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={tr("Choose destination")}
+                    onClick={() => void changeDestination()}
+                    disabled={phase === "downloading" || phase === "packaging"}
+                  >
+                    <FolderOpen size={17} />
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className="icon-button"
-                  aria-label={tr("Choose destination")}
-                  onClick={() => void changeDestination()}
-                  disabled={phase === "downloading" || phase === "packaging"}
-                >
-                  <FolderOpen size={17} />
-                </button>
-              </div>}
+              )}
 
               <label className="confirmation-row">
                 <input
@@ -643,9 +733,7 @@ export function ImportPanel() {
                 <span className="checkbox-mark">
                   <Check size={13} />
                 </span>
-                <span>
-                  {tr("I have permission to download this work.")}
-                </span>
+                <span>{tr("I have permission to download this work.")}</span>
               </label>
 
               {(phase === "downloading" ||
@@ -654,7 +742,9 @@ export function ImportPanel() {
                 <div className="import-progress" aria-live="polite">
                   <div>
                     <span>{progress.label}</span>
-                    <strong>{phase === "complete" ? tr("Done") : `${percent}%`}</strong>
+                    <strong>
+                      {phase === "complete" ? tr("Done") : `${percent}%`}
+                    </strong>
                   </div>
                   <div className="progress-track">
                     <span
@@ -679,31 +769,59 @@ export function ImportPanel() {
                   {tr("Open library")}
                 </button>
               ) : (
-                <button
-                  type="button"
-                  className="primary-button wide"
-                  onClick={() => void runImport()}
-                  disabled={
-                    !confirmed ||
-                    (scope === "volume" && selectedVolume === null) ||
-                    (scope === "chapter" && selectedChapter === null) ||
-                    (scope === "series" && selectedSeriesChapters.size === 0) ||
-                    phase === "downloading" ||
-                    phase === "packaging" ||
-                    phase === "checking"
-                  }
-                >
-                  {phase === "downloading" || phase === "packaging" ? (
-                    <LoaderCircle className="spin" size={17} />
-                  ) : (
-                    <Download size={17} />
-                  )}
-                  {phase === "downloading"
-                    ? tr("Downloading…")
-                    : phase === "packaging"
-                      ? tr("Packaging CBZ…")
-                      : tr("Download and add to Koma")}
-                </button>
+                <div className="import-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => void readOnline()}
+                    aria-busy={readingOnline}
+                    disabled={
+                      !confirmed ||
+                      (scope === "volume" && selectedVolume === null) ||
+                      (scope === "chapter" && selectedChapter === null) ||
+                      (scope === "series" &&
+                        !seriesUsesVolumes &&
+                        selectedSeriesChapters.size === 0) ||
+                      phase === "downloading" ||
+                      phase === "packaging" ||
+                      phase === "checking"
+                    }
+                  >
+                    {readingOnline ? (
+                      <LoaderCircle className="spin" size={17} />
+                    ) : (
+                      <BookOpen size={17} />
+                    )}
+                    {tr("Read online")}
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => void runImport()}
+                    disabled={
+                      !confirmed ||
+                      (scope === "volume" && selectedVolume === null) ||
+                      (scope === "chapter" && selectedChapter === null) ||
+                      (scope === "series" &&
+                        !seriesUsesVolumes &&
+                        selectedSeriesChapters.size === 0) ||
+                      phase === "downloading" ||
+                      phase === "packaging" ||
+                      phase === "checking"
+                    }
+                  >
+                    {phase === "downloading" || phase === "packaging" ? (
+                      <LoaderCircle className="spin" size={17} />
+                    ) : (
+                      <Download size={17} />
+                    )}
+                    {phase === "downloading"
+                      ? tr("Downloading…")
+                      : phase === "packaging"
+                        ? tr("Packaging CBZ…")
+                        : tr("Download and add to Koma")}
+                  </button>
+                </div>
               )}
             </>
           )}

@@ -133,6 +133,66 @@ test("link import blocks download until explicit permission confirmation", async
   await expect(download).toBeEnabled();
 });
 
+test("online reading opens the selected scope and converts in place", async ({
+  page,
+}) => {
+  await openCleanPreview(page);
+  await page.getByRole("button", { name: "Import from link" }).click();
+  await page
+    .getByLabel("Source link")
+    .fill("https://mangafire.to/title/70ox7-hatori-to-furuta-no-hinichijou-sahanji");
+  await page.getByRole("button", { name: "Check link" }).click();
+  await page.getByRole("button", { name: "Chapter", exact: true }).click();
+  await page
+    .getByRole("checkbox", { name: "I have permission to download this work." })
+    .check();
+  const readOnline = page.getByRole("button", { name: "Read online" });
+  await readOnline.click();
+  await expect(readOnline.locator(".spin")).toBeVisible();
+  await expect(page.locator(".reader-shell")).toBeVisible();
+  const chapterSelect = page.getByRole("combobox", { name: "Choose chapter" });
+  await expect(chapterSelect).toHaveValue("1");
+  await page.getByRole("button", { name: /Previous chapter/ }).click();
+  await expect(chapterSelect).toHaveValue("0");
+  const readerDownload = page
+    .locator(".reader-toolbar")
+    .getByRole("button", { name: "Download to library" });
+  await expect(readerDownload).toBeVisible();
+  await readerDownload.click();
+  await page.getByRole("button", { name: /Original selection/ }).click();
+  await expect(page.getByText("Downloaded to library")).toBeVisible();
+});
+
+test("online reading opens reliably from the mobile import flow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openCleanPreview(page);
+  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("menuitem", { name: "Import from link" }).click();
+  await page
+    .getByLabel("Source link")
+    .fill(
+      "https://mangafire.to/title/70ox7-hatori-to-furuta-no-hinichijou-sahanji",
+    );
+  await page.getByRole("button", { name: "Check link" }).click();
+  await page.getByRole("button", { name: "Entire series" }).click();
+  await page
+    .getByRole("checkbox", { name: "I have permission to download this work." })
+    .check();
+  const readOnline = page.getByRole("button", { name: "Read online" });
+  await readOnline.click();
+  await expect(readOnline.locator(".spin")).toBeVisible();
+  await expect(page.locator(".reader-shell")).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Choose chapter" })).toBeVisible();
+  await page.mouse.move(195, 420);
+  await expect(
+    page
+      .locator(".reader-toolbar")
+      .getByRole("button", { name: "Download to library" }),
+  ).toBeVisible();
+});
+
 test("reader sliders, mode arrow, and page motion remain interactive", async ({
   page,
 }) => {
@@ -185,6 +245,13 @@ test("reader sliders, mode arrow, and page motion remain interactive", async ({
     originalMode === "spreads" ? "singlePage" : "spreads",
   );
   await expect(modeSelect).not.toHaveValue(originalMode);
+
+  await modeSelect.selectOption("spreads");
+  await pageSlider.focus();
+  await page.keyboard.press("End");
+  await page.keyboard.press("ArrowLeft");
+  await expect(pageSlider).toHaveAttribute("aria-valuenow", "41");
+  await expect(page.locator(".reader-page-number")).toContainText("40–41 / 42");
 
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Reader settings", exact: true }).click();

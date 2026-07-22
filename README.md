@@ -5,7 +5,7 @@
 
   <p><strong>The best way to read your manga.</strong></p>
   <p>
-    A new manga and comic reader for your files.<br>
+    A new manga and comic reader for your collection.<br>
     Built with Rust and Tauri.
   </p>
 
@@ -31,16 +31,16 @@
   <img src="docs/readme/library-dark.png" alt="Koma's dark library showing continue reading, a comic collection, and publication details">
 </p>
 
-Add a book, start reading, and enjoy.
-Your library stays on your disk, and the interface stays out of the art. Simple.
+Add a book or open a source, start reading, and enjoy.
+The interface stays out of the art. Simple.
 
 Supports: `CBZ` · `CBR` · `CB7` · `CBT` · `PDF` · `EPUB`, and more.
 
-## Enjoy whats yours
+## Simple, focused reading
 
-It's all quiet, and that's how it's meant to be. Bring your own library, and enjoy it.
+It's all quiet, and that's how it's meant to be.
 
-Koma supports left-to-right and right-to-left books, configurable page gaps, fit and zoom behavior, fullscreen, page
+Koma supports left-to-right and right-to-left layouts, configurable page gaps, fit and zoom behavior, fullscreen, page
 transitions, and touch controls, and all out of the way, in a nice sleek interface.
 
 <p align="center">
@@ -49,24 +49,24 @@ transitions, and touch controls, and all out of the way, in a nice sleek interfa
 
 All the settings you'd need, all at your fingertips.
 
-## Importing from online
+## Your library
 
-Paste a supported link and choose a chapter, a volume, or a complete series, and download it for offline reading.
+With Koma, you can bring your own collection, or use connectors to read online, directly. Choose a chapter, volume, or complete series, and start reading immediately.
+
+Want to keep an online volume? Koma allows you to download it to your library, too.
 
 <p align="center">
   <img src="docs/readme/import-series-dark.png" alt="Koma's link importer showing chapter selection for a complete series">
 </p>
 
-MangaFire support is included. Koma also accepts
-[custom connectors](connectors/README.md) for other sources: simple
-JSON mappings cover straightforward APIs, while an optional Rhai transform can
-normalize more difficult responses.
+MangaFire support is included. Koma also reads through [custom connectors](connectors/README.md), so a connector can
+add another source without changing Koma itself.
 
-> Rhai connectors run code. Koma restricts their network access, resources, and exposed APIs, but  you should still inspect scripted connectors before installing them.
+> Rhai connectors run code. Inspect connectors before installing them.
 
 ## On mobile
 
-Koma's on mobile too, with a tailored UI to boot.
+Koma's on mobile too, so you can enjoy the same experience anywhere.
 
 <p align="center">
   <img src="docs/readme/library-mobile-dark.png" width="300" alt="Koma's dark library on a phone">
@@ -95,10 +95,11 @@ Koma's on mobile too, with a tailored UI to boot.
 - Scheduled folder scanning for large existing collections
 - Hide whatever you'd like, with a Hidden section.
 
-### Imports and connectors
+### Online reading and connectors
 
-- Downloads from remote sources (chapter, volume, entire series)
-- Bundled MangaFire importer and extensible connectors, for other sites.
+- Read a chapter, volume, or entire series online, with in-reader chapter navigation
+- Download the same selected scope to your library whenever you want
+- Built-in MangaFire support and extensible connectors for other sources
 - Sandboxed Rhai transforms for sources that need custom response handling
 
 ### External features

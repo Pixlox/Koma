@@ -22,6 +22,7 @@ import type {
   ConnectorPackagePreview,
   ConnectorSummary,
   ImportEvent,
+  ImportEventPayload,
   ImportOptions,
   ImportPreview,
   LibraryItem,
@@ -30,6 +31,7 @@ import type {
   LibraryScanReport,
   LinkImportResult,
   MetadataSaveResult,
+  OnlineNavigationResult,
   PagePayload,
   PublicationInspection,
   PublicationMetadata,
@@ -94,7 +96,10 @@ export interface KomaBackend {
     publicationId: string,
     completed: boolean,
   ): Promise<ReadingState>;
-  openReader(publicationId: string, password?: string): Promise<ReaderOpenPayload>;
+  openReader(
+    publicationId: string,
+    password?: string,
+  ): Promise<ReaderOpenPayload>;
   readPage(publicationId: string, pageIndex: number): Promise<PagePayload>;
   saveProgress(
     publicationId: string,
@@ -139,7 +144,20 @@ export interface KomaBackend {
   removeBookmark(bookmarkId: string): Promise<boolean>;
   previewLink(source: string): Promise<ImportPreview>;
   importLink(source: string, options: ImportOptions): Promise<LinkImportResult>;
-  onImportEvent(handler: (event: ImportEvent) => void): Promise<UnlistenFn>;
+  readLinkOnline(source: string, options: ImportOptions): Promise<LibraryItem>;
+  navigateOnlinePublication(
+    publicationId: string,
+    targetScope: "chapter" | "volume",
+    targetId: number,
+  ): Promise<OnlineNavigationResult>;
+  downloadOnlinePublication(
+    publicationId: string,
+    options?: ImportOptions,
+  ): Promise<LinkImportResult>;
+  onImportEvent(
+    handler: (event: ImportEvent, jobId: string) => void,
+  ): Promise<UnlistenFn>;
+  cancelImport(jobId: string): Promise<boolean>;
   setDiscordPresence(
     enabled: boolean,
     details: string,
@@ -172,9 +190,7 @@ export interface KomaBackend {
 }
 
 export type FileDropState =
-  | { type: "over" }
-  | { type: "drop"; paths: string[] }
-  | { type: "cancel" };
+  { type: "over" } | { type: "drop"; paths: string[] } | { type: "cancel" };
 
 function pickBrowserFiles(accept: string, multiple: boolean): Promise<File[]> {
   return new Promise((resolve) => {
@@ -424,11 +440,7 @@ class NativeBackend implements KomaBackend {
     });
   }
 
-  relinkPublication(
-    publicationId: string,
-    path: string,
-    password?: string,
-  ) {
+  relinkPublication(publicationId: string, path: string, password?: string) {
     return invoke<LibraryItem>("relink_publication", {
       publicationId,
       path,
@@ -476,11 +488,15 @@ class NativeBackend implements KomaBackend {
   }
 
   inspectConnectorPackage(path: string) {
-    return invoke<ConnectorPackagePreview>("inspect_connector_package", { path });
+    return invoke<ConnectorPackagePreview>("inspect_connector_package", {
+      path,
+    });
   }
 
   installConnectorPackage(installToken: string) {
-    return invoke<ConnectorSummary>("install_connector_package", { installToken });
+    return invoke<ConnectorSummary>("install_connector_package", {
+      installToken,
+    });
   }
 
   removeConnector(connectorId: string) {
@@ -616,21 +632,62 @@ class NativeBackend implements KomaBackend {
     return invoke<ImportPreview>("preview_link", { source });
   }
 
-  importLink(source: string, options: ImportOptions) {
-    return invoke<LinkImportResult>("import_link", { source, options });
+  async importLink(source: string, options: ImportOptions) {
+    const jobId = uuid();
+    try {
+      return await invoke<LinkImportResult>("import_link", {
+        source,
+        options,
+        jobId,
+      });
+    } finally {
+      notifyImportFinished(jobId);
+    }
   }
 
-  onImportEvent(handler: (event: ImportEvent) => void) {
-    return listen<ImportEvent>("koma://import-event", (event) => {
-      handler(event.payload);
+  readLinkOnline(source: string, options: ImportOptions) {
+    return invoke<LibraryItem>("read_link_online", { source, options });
+  }
+
+  navigateOnlinePublication(
+    publicationId: string,
+    targetScope: "chapter" | "volume",
+    targetId: number,
+  ) {
+    return invoke<OnlineNavigationResult>("navigate_online_publication", {
+      publicationId,
+      targetScope,
+      targetId,
     });
   }
 
-  setDiscordPresence(
-    enabled: boolean,
-    details: string,
-    activityState: string,
+  async downloadOnlinePublication(
+    publicationId: string,
+    options?: ImportOptions,
   ) {
+    const jobId = uuid();
+    try {
+      return await invoke<LinkImportResult>("download_online_publication", {
+        publicationId,
+        options: options ?? null,
+        jobId,
+      });
+    } finally {
+      notifyImportFinished(jobId);
+    }
+  }
+
+  onImportEvent(handler: (event: ImportEvent, jobId: string) => void) {
+    return listen<ImportEventPayload>("koma://import-event", (event) => {
+      handler(event.payload.event, event.payload.jobId);
+    });
+  }
+
+  cancelImport(jobId: string) {
+    return invoke<boolean>("cancel_import", { jobId });
+  }
+
+  setDiscordPresence(enabled: boolean, details: string, activityState: string) {
     return invoke<boolean>("set_discord_presence", {
       enabled,
       details,
@@ -704,14 +761,21 @@ function uuid(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
+function notifyImportFinished(jobId: string) {
+  window.dispatchEvent(
+    new CustomEvent<string>("koma:import-finished", { detail: jobId }),
+  );
+}
+
 class PreviewBackend implements KomaBackend {
   readonly kind = "preview" as const;
-  private importHandlers = new Set<(event: ImportEvent) => void>();
+  private importHandlers = new Set<
+    (event: ImportEvent, jobId: string) => void
+  >();
+  private cancelledImports = new Set<string>();
   private tracking = new Map<TrackingProvider, TrackingAccount>();
   private mappings: TrackingMapping[] = [];
-  private trackingAuthHandlers = new Set<
-    (event: TrackingAuthEvent) => void
-  >();
+  private trackingAuthHandlers = new Set<(event: TrackingAuthEvent) => void>();
 
   bootstrap() {
     return Promise.resolve(demoBootstrap());
@@ -791,7 +855,11 @@ class PreviewBackend implements KomaBackend {
     const items = readDemoItems();
     const template = items[0];
     if (template === undefined) throw new Error("Demo library is unavailable");
-    const title = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "Untitled";
+    const title =
+      path
+        .split(/[\\/]/)
+        .pop()
+        ?.replace(/\.[^.]+$/, "") ?? "Untitled";
     const item: LibraryItem = {
       ...template,
       id: uuid(),
@@ -825,7 +893,9 @@ class PreviewBackend implements KomaBackend {
 
   listLibraryFolders() {
     return Promise.resolve(
-      JSON.parse(localStorage.getItem("koma.demo.folders") ?? "[]") as LibraryFolder[],
+      JSON.parse(
+        localStorage.getItem("koma.demo.folders") ?? "[]",
+      ) as LibraryFolder[],
     );
   }
 
@@ -843,7 +913,10 @@ class PreviewBackend implements KomaBackend {
       lastFailureCount: report.failures.length,
       lastError: null,
     };
-    const next = [folder, ...folders.filter((candidate) => candidate.id !== folder.id)];
+    const next = [
+      folder,
+      ...folders.filter((candidate) => candidate.id !== folder.id),
+    ];
     localStorage.setItem("koma.demo.folders", JSON.stringify(next));
     return { folder, report };
   }
@@ -860,7 +933,9 @@ class PreviewBackend implements KomaBackend {
     localStorage.setItem(
       "koma.demo.folders",
       JSON.stringify(
-        folders.map((candidate) => (candidate.id === folderId ? updated : candidate)),
+        folders.map((candidate) =>
+          candidate.id === folderId ? updated : candidate,
+        ),
       ),
     );
     return updated;
@@ -888,7 +963,9 @@ class PreviewBackend implements KomaBackend {
     localStorage.setItem(
       "koma.demo.folders",
       JSON.stringify(
-        folders.map((candidate) => (candidate.id === folderId ? updated : candidate)),
+        folders.map((candidate) =>
+          candidate.id === folderId ? updated : candidate,
+        ),
       ),
     );
     return { folder: updated, report };
@@ -1180,7 +1257,11 @@ class PreviewBackend implements KomaBackend {
   }
 
   previewLink(source: string) {
-    if (!/^https:\/\/mangafire\.to\/title\/[a-z0-9-]+(?:\/volume\/\d+)?(?:\?.*)?$/i.test(source.trim())) {
+    if (
+      !/^https:\/\/mangafire\.to\/title\/[a-z0-9-]+(?:\/volume\/\d+)?(?:\?.*)?$/i.test(
+        source.trim(),
+      )
+    ) {
       throw commandError(
         "unsupported_format",
         tr("Paste a MangaFire title or volume link."),
@@ -1253,60 +1334,153 @@ class PreviewBackend implements KomaBackend {
   }
 
   async importLink(source: string, options: ImportOptions) {
+    const jobId = uuid();
     const preview = await this.previewLink(source);
-    this.emit({ kind: "checking", url: preview.eligibilityUrl });
-    this.emit({ kind: "eligible", status: 200 });
+    this.emit({ kind: "checking", url: preview.eligibilityUrl }, jobId);
+    this.emit({ kind: "eligible", status: 200 }, jobId);
     const pageCount =
       options.scope === "chapter" ? 19 : options.scope === "series" ? 435 : 397;
-    this.emit({
-      kind: "discovered",
-      title: preview.title,
-      volume:
+    this.emit(
+      {
+        kind: "discovered",
+        title: preview.title,
+        volume:
+          options.scope === "chapter"
+            ? "Chapter 17"
+            : options.scope === "series"
+              ? "Series"
+              : "Volume 1",
+        pageCount,
+      },
+      jobId,
+    );
+    try {
+      for (const completed of [
+        Math.min(pageCount, Math.ceil(pageCount * 0.2)),
+        Math.min(pageCount, Math.ceil(pageCount * 0.5)),
+        pageCount,
+      ]) {
+        await new Promise((resolve) => window.setTimeout(resolve, 80));
+        if (this.cancelledImports.delete(jobId)) {
+          throw new Error(tr("Download cancelled"));
+        }
+        this.emit({ kind: "downloading", completed, total: pageCount }, jobId);
+      }
+      const qualifier =
         options.scope === "chapter"
-          ? "Chapter 17"
+          ? "Ch. 17"
           : options.scope === "series"
-            ? "Series"
-            : "Volume 1",
-      pageCount,
-    });
-    for (const completed of [
-      Math.min(pageCount, Math.ceil(pageCount * 0.2)),
-      Math.min(pageCount, Math.ceil(pageCount * 0.5)),
-      pageCount,
-    ]) {
-      await new Promise((resolve) => window.setTimeout(resolve, 80));
-      this.emit({ kind: "downloading", completed, total: pageCount });
+            ? "Complete"
+            : "Vol. 1";
+      const outputPath = `${options.destinationDirectory}/${preview.title} — ${qualifier} [en].cbz`;
+      this.emit({ kind: "packaging", outputPath }, jobId);
+      const item = await this.addPublication(outputPath);
+      const receipt = {
+        id: uuid(),
+        provider: "MangaFire",
+        sourceUrl: source,
+        eligibilityUrl: preview.eligibilityUrl,
+        eligibilityStatus: 200,
+        checkedAt: new Date().toISOString(),
+        pageCount,
+        outputPath,
+        outputHash: "preview-only",
+        adapterVersion: "browser-preview",
+      };
+      this.emit({ kind: "completed", receipt }, jobId);
+      return { receipt, item };
+    } finally {
+      this.cancelledImports.delete(jobId);
+      notifyImportFinished(jobId);
     }
-    const qualifier =
-      options.scope === "chapter"
-        ? "Ch. 17"
-        : options.scope === "series"
-          ? "Complete"
-          : "Vol. 1";
-    const outputPath = `${options.destinationDirectory}/${preview.title} — ${qualifier} [en].cbz`;
-    this.emit({ kind: "packaging", outputPath });
-    const item = await this.addPublication(outputPath);
-    const receipt = {
-      id: uuid(),
-      provider: "MangaFire",
-      sourceUrl: source,
-      eligibilityUrl: preview.eligibilityUrl,
-      eligibilityStatus: 200,
-      checkedAt: new Date().toISOString(),
-      pageCount,
-      outputPath,
-      outputHash: "preview-only",
-      adapterVersion: "browser-preview",
-    };
-    this.emit({ kind: "completed", receipt });
-    return { receipt, item };
   }
 
-  onImportEvent(handler: (event: ImportEvent) => void) {
+  async readLinkOnline(source: string, options: ImportOptions) {
+    const result = await this.importLink(source, options);
+    const item: LibraryItem = {
+      ...result.item,
+      format: "online",
+      path: `koma-online://${result.item.id}`,
+    };
+    writeDemoItems(
+      readDemoItems().map((candidate) =>
+        candidate.id === item.id ? item : candidate,
+      ),
+    );
+    return item;
+  }
+
+  async navigateOnlinePublication(
+    publicationId: string,
+    targetScope: "chapter" | "volume",
+    targetId: number,
+  ): Promise<OnlineNavigationResult> {
+    const item = this.item(publicationId);
+    const reader = await this.openReader(publicationId);
+    const source = reader.onlineSource;
+    if (source !== null && source !== undefined) {
+      const catalog =
+        targetScope === "chapter"
+          ? source.chapterCatalog
+          : source.volumeCatalog;
+      const target = catalog.find((section) => section.id === targetId);
+      const current = source.chapters[0];
+      if (target !== undefined && current !== undefined) {
+        source.chapterId =
+          targetScope === "chapter" ? targetId : source.chapterId;
+        source.volumeId = targetScope === "volume" ? targetId : source.volumeId;
+        source.chapters[0] = {
+          ...current,
+          id:
+            targetScope === "chapter" ? String(targetId) : `volume:${targetId}`,
+          number: target.number,
+          title: target.title,
+          volume: targetScope === "volume" ? target.number : null,
+        };
+      }
+    }
+    return { item, reader };
+  }
+
+  async downloadOnlinePublication(
+    publicationId: string,
+    options?: ImportOptions,
+  ) {
+    const current = this.item(publicationId);
+    const result = await this.importLink(
+      "https://mangafire.to/title/70ox7-hatori-to-furuta-no-hinichijou-sahanji",
+      options ?? {
+        destinationDirectory: "/Downloads/Koma",
+        volumeId: null,
+        chapterId: null,
+        selectedChapterIds: [],
+        scope: "series",
+        preferredLanguage: "en",
+        overwriteExisting: false,
+        downloadConcurrency: 6,
+      },
+    );
+    const item = { ...result.item, id: current.id };
+    writeDemoItems(
+      readDemoItems()
+        .filter((candidate) => candidate.id !== result.item.id)
+        .map((candidate) =>
+          candidate.id === publicationId ? item : candidate,
+        ),
+    );
+    return { ...result, item };
+  }
+
+  onImportEvent(handler: (event: ImportEvent, jobId: string) => void) {
     this.importHandlers.add(handler);
     return Promise.resolve(() => {
       this.importHandlers.delete(handler);
     });
+  }
+
+  cancelImport(jobId: string) {
+    this.cancelledImports.add(jobId);
+    return Promise.resolve(true);
   }
 
   setDiscordPresence() {
@@ -1324,6 +1498,7 @@ class PreviewBackend implements KomaBackend {
       bookmarks: 0,
       importReceipts: 0,
       metadataOverrides: 0,
+      onlineSources: 0,
       missingSources: 0,
     });
   }
@@ -1365,7 +1540,8 @@ class PreviewBackend implements KomaBackend {
         skippedPages: [],
         sourceBytes: source.pageCount * 860_000,
         outputBytes:
-          source.pageCount * (options.imageFormat === "jpeg" ? 420_000 : 780_000),
+          source.pageCount *
+          (options.imageFormat === "jpeg" ? 420_000 : 780_000),
         outputHash: "preview-only",
         backupPath: null,
       },
@@ -1373,26 +1549,16 @@ class PreviewBackend implements KomaBackend {
     };
   }
 
-  repairPublication(
-    publicationId: string,
-    destination: string,
-  ) {
-    return this.convertPublication(
-      publicationId,
-      destination,
-      {
-        imageFormat: "original",
-        jpegQuality: 90,
-        maxDimension: null,
-        skipUnreadablePages: true,
-      },
-    );
+  repairPublication(publicationId: string, destination: string) {
+    return this.convertPublication(publicationId, destination, {
+      imageFormat: "original",
+      jpegQuality: 90,
+      maxDimension: null,
+      skipUnreadablePages: true,
+    });
   }
 
-  saveMetadata(
-    publicationId: string,
-    metadata: PublicationMetadata,
-  ) {
+  saveMetadata(publicationId: string, metadata: PublicationMetadata) {
     const item = this.item(publicationId);
     const updated = {
       ...item,
@@ -1413,13 +1579,16 @@ class PreviewBackend implements KomaBackend {
     return path;
   }
 
-  private emit(event: ImportEvent) {
-    for (const handler of this.importHandlers) handler(event);
+  private emit(event: ImportEvent, jobId: string) {
+    for (const handler of this.importHandlers) handler(event, jobId);
   }
 
   private item(publicationId: string) {
-    const item = readDemoItems().find((candidate) => candidate.id === publicationId);
-    if (item === undefined) throw new Error("Publication is not in the demo library");
+    const item = readDemoItems().find(
+      (candidate) => candidate.id === publicationId,
+    );
+    if (item === undefined)
+      throw new Error("Publication is not in the demo library");
     return item;
   }
 

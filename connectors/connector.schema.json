@@ -210,7 +210,15 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 262144,
-      "description": "Schema v2 Rhai expression or script that returns the JSON value consumed by mapping."
+      "description": "Schema v2 Rhai script that returns the JSON value consumed by mapping. Scripts may use Koma's guarded http(method, url, headers, body) helper."
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 4096
+      },
+      "description": "Connector-defined values exposed to Rhai as the settings map."
     }
   },
   "$defs": {

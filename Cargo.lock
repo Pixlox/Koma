@@ -1637,6 +1637,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -2751,7 +2752,9 @@ dependencies = [
 name = "koma"
 version = "0.1.4"
 dependencies = [
+ "apple-native-keyring-store",
  "base64 0.22.1",
+ "blake3",
  "chrono",
  "discord-rich-presence",
  "keyring",
@@ -4366,6 +4369,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

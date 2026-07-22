@@ -94,7 +94,7 @@ describe("Koma application workflows", () => {
 
     fireEvent.keyDown(window, { key: "ArrowRight" });
     await waitFor(() => {
-      expect(slider).toHaveAttribute("aria-valuenow", "20");
+      expect(slider).toHaveAttribute("aria-valuenow", "21");
     });
 
     fireEvent.keyDown(window, { key: "s" });

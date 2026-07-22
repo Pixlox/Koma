@@ -28,7 +28,7 @@ use crate::{
     error::{KomaError, Result},
     formats::{MAX_PAGES, ZipPublication, validate_page_bytes},
     metadata::ComicInfo,
-    model::{ChapterRange, ImportReceipt, KomaArchiveMetadata},
+    model::{ChapterRange, ImportReceipt, KomaArchiveMetadata, PageData},
 };
 
 mod connector;
@@ -85,6 +85,202 @@ pub enum ImportScope {
     Volume,
     Chapter,
     Series,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePage {
+    pub url: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteChapter {
+    pub id: Option<String>,
+    pub number: f64,
+    pub title: Option<String>,
+    pub volume: Option<f64>,
+    pub pages: Vec<RemotePage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteNavigationItem {
+    pub id: u64,
+    pub number: f64,
+    pub title: Option<String>,
+    pub language: String,
+}
+
+/// A connector-neutral publication resolved from a web source. Koma owns all
+/// network and filesystem side effects; connectors only describe these pages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePublication {
+    pub provider: String,
+    pub source_url: String,
+    pub eligibility_url: String,
+    pub eligibility_status: u16,
+    pub title: String,
+    pub language: Option<String>,
+    pub scope: ImportScope,
+    pub volume_id: Option<u64>,
+    pub chapter_id: Option<u64>,
+    pub selected_chapter_ids: Vec<u64>,
+    pub chapters: Vec<RemoteChapter>,
+    #[serde(default)]
+    pub chapter_catalog: Vec<RemoteNavigationItem>,
+    #[serde(default)]
+    pub volume_catalog: Vec<RemoteNavigationItem>,
+    pub allowed_page_hosts: Vec<String>,
+    #[serde(default)]
+    pub allow_local_network: bool,
+}
+
+pub async fn fetch_remote_page(
+    publication: &RemotePublication,
+    page_index: usize,
+) -> Result<PageData> {
+    let page = publication
+        .chapters
+        .iter()
+        .flat_map(|chapter| chapter.pages.iter())
+        .nth(page_index)
+        .ok_or(KomaError::PageOutOfRange { index: page_index })?;
+    let url = Url::parse(&page.url)?;
+    if (url.scheme() != "https" && !(publication.allow_local_network && url.scheme() == "http"))
+        || url.username() != ""
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(KomaError::ImportDenied(
+            "online page URL is not permitted by this connector".to_owned(),
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| KomaError::ImportDenied("online page URL has no host".to_owned()))?
+        .to_ascii_lowercase();
+    if !publication
+        .allowed_page_hosts
+        .iter()
+        .any(|allowed| host_matches(&host, allowed))
+    {
+        return Err(KomaError::ImportDenied(format!(
+            "online page host {host} is not allowed by this connector"
+        )));
+    }
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addresses = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|error| KomaError::ProviderUnavailable(error.to_string()))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty()
+        || (!publication.allow_local_network
+            && addresses
+                .iter()
+                .any(|address| is_non_public_ip(address.ip())))
+    {
+        return Err(KomaError::ImportDenied(
+            "online page host did not resolve to a public address".to_owned(),
+        ));
+    }
+    let mut builder = client_builder();
+    for address in addresses {
+        builder = builder.resolve(&host, address);
+    }
+    let client = builder.build()?;
+    let mut response = None;
+    for attempt in 0..4 {
+        match client
+            .get(url.clone())
+            .header(ACCEPT, "image/avif,image/webp,image/*")
+            .header(REFERER, &publication.eligibility_url)
+            .send()
+            .await
+        {
+            Ok(next)
+                if attempt < 3
+                    && (next.status() == StatusCode::TOO_MANY_REQUESTS
+                        || next.status().is_server_error()) =>
+            {
+                let delay = provider_retry_delay(&next, attempt);
+                drop(next);
+                tokio::time::sleep(delay).await;
+            }
+            Ok(next) => {
+                response = Some(next);
+                break;
+            }
+            Err(error) if attempt < 3 && (error.is_connect() || error.is_timeout()) => {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    300 * 2_u64.pow(attempt as u32),
+                ))
+                .await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let response = response.ok_or_else(|| {
+        KomaError::ProviderUnavailable("online page request exhausted its retry budget".to_owned())
+    })?;
+    require_success(response.status(), "online page request")?;
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let bytes = read_bounded(response, MAX_IMPORT_PAGE_BYTES, "online page").await?;
+    let extension = page_extension(&url, content_type.as_deref());
+    validate_page_bytes(&format!("page.{extension}"), &bytes)?;
+    Ok(PageData {
+        index: page_index,
+        mime_type: content_type
+            .filter(|value| value.starts_with("image/"))
+            .unwrap_or_else(|| format!("image/{extension}")),
+        bytes,
+    })
+}
+
+fn host_matches(host: &str, allowed: &str) -> bool {
+    let allowed = allowed.trim().to_ascii_lowercase();
+    if let Some(suffix) = allowed.strip_prefix("*.") {
+        host != suffix && host.ends_with(&format!(".{suffix}"))
+    } else {
+        host == allowed
+    }
+}
+
+impl RemotePublication {
+    pub fn page_count(&self) -> usize {
+        self.chapters
+            .iter()
+            .map(|chapter| chapter.pages.len())
+            .sum()
+    }
+
+    pub fn chapter_ranges(&self) -> Vec<ChapterRange> {
+        let mut page = 0;
+        self.chapters
+            .iter()
+            .filter_map(|chapter| {
+                if chapter.pages.is_empty() {
+                    return None;
+                }
+                let start_page_index = page;
+                page += chapter.pages.len();
+                Some(ChapterRange {
+                    id: chapter.id.clone(),
+                    number: chapter.number,
+                    title: chapter.title.clone(),
+                    start_page_index,
+                    end_page_index: page - 1,
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +361,31 @@ pub trait LinkImporter: Send + Sync {
     fn provider(&self) -> &str;
     fn recognizes(&self, source: &str) -> bool;
     async fn preview(&self, source: &str) -> Result<ImportPreview>;
+    async fn resolve_online(
+        &self,
+        source: &str,
+        options: &ImportOptions,
+    ) -> Result<RemotePublication>;
+    async fn navigate_online(
+        &self,
+        publication: &RemotePublication,
+        target_scope: ImportScope,
+        target_id: u64,
+    ) -> Result<RemotePublication> {
+        let mut options = ImportOptions::new(PathBuf::new());
+        options.scope = target_scope;
+        options.preferred_language = publication.language.clone();
+        match target_scope {
+            ImportScope::Chapter => options.chapter_id = Some(target_id),
+            ImportScope::Volume => options.volume_id = Some(target_id),
+            ImportScope::Series => {
+                return Err(KomaError::Other(
+                    "choose a chapter or volume to open".to_owned(),
+                ));
+            }
+        }
+        self.resolve_online(&publication.source_url, &options).await
+    }
     async fn import(
         &self,
         source: &str,
@@ -278,8 +499,8 @@ impl MangaFireImporter {
             ));
         }
 
-        let (summaries, selected_id) = if let Some(volume_id) = target.volume_id {
-            (Vec::new(), volume_id)
+        let selected_id = if let Some(volume_id) = target.volume_id {
+            volume_id
         } else {
             let volumes_url = self.api_url(&format!("titles/{}/volumes", target.hid))?;
             let response: VolumeListResponse = self.request_json(&volumes_url).await?;
@@ -288,12 +509,11 @@ impl MangaFireImporter {
                     "this title does not expose any downloadable volumes".to_owned(),
                 ));
             }
-            let selected = select_volume(
+            select_volume(
                 &response.items,
                 requested_volume_id,
                 preferred_language.unwrap_or("en"),
-            )?;
-            (response.items, selected)
+            )?
         };
 
         let volume_url = self.api_url(&format!("volumes/{selected_id}"))?;
@@ -338,8 +558,127 @@ impl MangaFireImporter {
             proof,
             title: title_response.data,
             volume,
-            summaries,
         })
+    }
+
+    async fn catalog(
+        &self,
+        source: &str,
+        requested_volume_id: Option<u64>,
+        preferred_language: Option<&str>,
+    ) -> Result<MangaFireCatalog> {
+        let target = self.parse_target(source)?;
+        let proof = self.check_eligibility(&target.source_url).await?;
+        let title_url = self.api_url(&format!("titles/{}", target.hid))?;
+        let title_response: ApiData<MangaFireTitle> = self.request_json(&title_url).await?;
+        if title_response.data.hid != target.hid {
+            return Err(KomaError::ProviderChanged(
+                "the title response did not match the pasted link".to_owned(),
+            ));
+        }
+
+        let volumes_url = self.api_url(&format!("titles/{}/volumes", target.hid))?;
+        let volume_response: VolumeListResponse = self.request_json(&volumes_url).await?;
+        let mut volumes = volume_response.items;
+        volumes.sort_by(|left, right| {
+            left.number
+                .partial_cmp(&right.number)
+                .unwrap_or(CmpOrdering::Equal)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let requested_volume_id = target.volume_id.or(requested_volume_id);
+        let requested_volume =
+            requested_volume_id.and_then(|id| volumes.iter().find(|volume| volume.id == id));
+        if requested_volume_id.is_some() && requested_volume.is_none() && !volumes.is_empty() {
+            return Err(KomaError::ImportDenied(
+                "the requested volume is not exposed by this title".to_owned(),
+            ));
+        }
+        let preferred_language = preferred_language.unwrap_or("en");
+        let language = requested_volume
+            .or_else(|| {
+                volumes
+                    .iter()
+                    .find(|volume| volume.language.eq_ignore_ascii_case(preferred_language))
+            })
+            .map(|volume| volume.language.clone())
+            .or_else(|| {
+                title_response
+                    .data
+                    .languages
+                    .iter()
+                    .find(|language| language.eq_ignore_ascii_case(preferred_language))
+                    .cloned()
+            })
+            .or_else(|| volumes.first().map(|volume| volume.language.clone()))
+            .or_else(|| title_response.data.languages.first().cloned())
+            .unwrap_or_else(|| preferred_language.to_owned());
+        let chapters = self
+            .chapter_summaries(&target.hid, &language, false)
+            .await?;
+        if volumes.is_empty() && chapters.is_empty() {
+            return Err(KomaError::ProviderChanged(
+                "this title exposes no readable chapters or volumes".to_owned(),
+            ));
+        }
+        Ok(MangaFireCatalog {
+            target,
+            proof,
+            title: title_response.data,
+            language,
+            volumes,
+            chapters,
+        })
+    }
+
+    async fn load_volume(&self, title_hid: &str, volume_id: u64) -> Result<MangaFireVolume> {
+        let volume_url = self.api_url(&format!("volumes/{volume_id}"))?;
+        let response: ApiData<MangaFireVolume> = self.request_json(&volume_url).await?;
+        let volume = response.data;
+        if volume.id != volume_id || volume.title.hid != title_hid {
+            return Err(KomaError::ProviderChanged(
+                "the selected volume did not belong to the pasted title".to_owned(),
+            ));
+        }
+        if volume.pages.is_empty() {
+            return Err(KomaError::ProviderChanged(
+                "the selected volume contains no pages".to_owned(),
+            ));
+        }
+        if volume.pages.len() > MAX_PAGES {
+            return Err(KomaError::ProviderChanged(format!(
+                "the selected volume contains more than {MAX_PAGES} pages"
+            )));
+        }
+        for page in &volume.pages {
+            validate_page_url(&Url::parse(&page.url)?, self.origin.host_str())?;
+        }
+        Ok(volume)
+    }
+
+    fn resolved_from_catalog(catalog: MangaFireCatalog) -> ResolvedImport {
+        let selected = catalog.volumes.iter().find(|volume| {
+            Some(volume.id) == catalog.target.volume_id
+                || volume.language.eq_ignore_ascii_case(&catalog.language)
+        });
+        let volume = MangaFireVolume {
+            id: selected.map(|volume| volume.id).unwrap_or(0),
+            number: selected.map(|volume| volume.number).unwrap_or(0.0),
+            name: selected
+                .map(|volume| volume.name.clone())
+                .unwrap_or_default(),
+            language: catalog.language,
+            pages: Vec::new(),
+            title: MangaFireVolumeTitle {
+                hid: catalog.target.hid.clone(),
+            },
+        };
+        ResolvedImport {
+            target: catalog.target,
+            proof: catalog.proof,
+            title: catalog.title,
+            volume,
+        }
     }
 
     fn parse_target(&self, source: &str) -> Result<MangaFireTarget> {
@@ -584,6 +923,15 @@ impl MangaFireImporter {
         title_hid: &str,
         language: &str,
     ) -> Result<Vec<MangaFireChapterSummary>> {
+        self.chapter_summaries(title_hid, language, true).await
+    }
+
+    async fn chapter_summaries(
+        &self,
+        title_hid: &str,
+        language: &str,
+        require_any: bool,
+    ) -> Result<Vec<MangaFireChapterSummary>> {
         let mut summaries = Vec::new();
         let mut page_number = 1;
         loop {
@@ -622,7 +970,7 @@ impl MangaFireImporter {
                 .unwrap_or(CmpOrdering::Equal)
                 .then_with(|| left.id.cmp(&right.id))
         });
-        if summaries.is_empty() {
+        if require_any && summaries.is_empty() {
             return Err(KomaError::ProviderChanged(
                 "this language exposes no official chapters".to_owned(),
             ));
@@ -877,6 +1225,56 @@ impl MangaFireImporter {
         let chapters = self
             .load_official_chapters(&resolved.target.hid, &resolved.volume.language, summaries)
             .await?;
+        self.package_series(resolved, options, events, chapters)
+            .await
+    }
+
+    async fn import_volume_series(
+        &self,
+        catalog: MangaFireCatalog,
+        options: &ImportOptions,
+        events: Option<&UnboundedSender<ImportEvent>>,
+    ) -> Result<ImportReceipt> {
+        let summaries = catalog
+            .volumes
+            .iter()
+            .filter(|volume| volume.language.eq_ignore_ascii_case(&catalog.language))
+            .cloned()
+            .collect::<Vec<_>>();
+        if summaries.is_empty() {
+            return Err(KomaError::ProviderChanged(
+                "this language exposes no readable volumes".to_owned(),
+            ));
+        }
+        let mut chapters = Vec::with_capacity(summaries.len());
+        for (index, summary) in summaries.into_iter().enumerate() {
+            if index > 0 && self.origin.scheme() == "https" {
+                tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+            }
+            let volume = self.load_volume(&catalog.target.hid, summary.id).await?;
+            chapters.push(ResolvedChapter {
+                number: volume.number,
+                name: volume.name,
+                chapter: MangaFireChapter {
+                    id: volume.id,
+                    language: volume.language,
+                    pages: volume.pages,
+                    title: volume.title,
+                },
+            });
+        }
+        let resolved = Self::resolved_from_catalog(catalog);
+        self.package_series(resolved, options, events, chapters)
+            .await
+    }
+
+    async fn package_series(
+        &self,
+        resolved: ResolvedImport,
+        options: &ImportOptions,
+        events: Option<&UnboundedSender<ImportEvent>>,
+        chapters: Vec<ResolvedChapter>,
+    ) -> Result<ImportReceipt> {
         let total = chapters.iter().try_fold(0_usize, |count, chapter| {
             count.checked_add(chapter.chapter.pages.len())
         });
@@ -1079,6 +1477,49 @@ impl MangaFireImporter {
         }
         Ok(Some(fallback))
     }
+
+    async fn volume_chapter_ranges(&self, resolved: &ResolvedImport) -> Result<Vec<ChapterRange>> {
+        let summaries = self
+            .official_chapter_summaries(&resolved.target.hid, &resolved.volume.language)
+            .await?;
+        if summaries.len() > 40 {
+            return Ok(Vec::new());
+        }
+        let chapters = self
+            .load_official_chapters(&resolved.target.hid, &resolved.volume.language, summaries)
+            .await?;
+        let counts = chapters
+            .iter()
+            .map(|chapter| chapter.chapter.pages.len())
+            .collect::<Vec<_>>();
+        let Some((start, end)) = unique_contiguous_page_range(&counts, resolved.volume.pages.len())
+        else {
+            return Ok(Vec::new());
+        };
+        if !chapters[start..=end]
+            .iter()
+            .flat_map(|chapter| chapter.chapter.pages.iter())
+            .zip(&resolved.volume.pages)
+            .all(|(chapter, volume)| compatible_page_geometry(chapter, volume))
+        {
+            return Ok(Vec::new());
+        }
+        let mut page = 0_usize;
+        Ok(chapters[start..=end]
+            .iter()
+            .map(|chapter| {
+                let start_page_index = page;
+                page += chapter.chapter.pages.len();
+                ChapterRange {
+                    id: Some(chapter.chapter.id.to_string()),
+                    number: chapter.number,
+                    title: clean_string(&chapter.name),
+                    start_page_index,
+                    end_page_index: page - 1,
+                }
+            })
+            .collect())
+    }
 }
 
 fn client_builder() -> reqwest::ClientBuilder {
@@ -1143,33 +1584,21 @@ impl LinkImporter for MangaFireImporter {
     }
 
     async fn preview(&self, source: &str) -> Result<ImportPreview> {
-        let resolved = self.resolve(source, None, Some("en"), None).await?;
-        let selected_id = resolved.volume.id;
-        let chapter_summaries = self
-            .official_chapter_summaries(&resolved.target.hid, &resolved.volume.language)
-            .await?;
-        let series_chapter_count = chapter_summaries.len();
-        let series_page_count = if series_chapter_count <= 40 {
-            Some(
-                self.load_official_chapters(
-                    &resolved.target.hid,
-                    &resolved.volume.language,
-                    chapter_summaries.clone(),
-                )
-                .await?
-                .iter()
-                .try_fold(0_usize, |total, chapter| {
-                    total.checked_add(chapter.chapter.pages.len())
-                })
-                .ok_or_else(|| {
-                    KomaError::ProviderChanged("the series page count overflowed".to_owned())
-                })?,
-            )
-        } else {
-            None
-        };
-        let selected_chapter_id = chapter_summaries.last().map(|chapter| chapter.id);
-        let chapters = chapter_summaries
+        let catalog = self.catalog(source, None, Some("en")).await?;
+        let selected_volume_id = catalog
+            .target
+            .volume_id
+            .or_else(|| {
+                catalog
+                    .volumes
+                    .iter()
+                    .find(|volume| volume.language.eq_ignore_ascii_case(&catalog.language))
+                    .map(|volume| volume.id)
+            })
+            .or_else(|| catalog.volumes.first().map(|volume| volume.id));
+        let selected_chapter_id = catalog.chapters.last().map(|chapter| chapter.id);
+        let chapters = catalog
+            .chapters
             .iter()
             .map(|chapter| ImportChapter {
                 id: chapter.id,
@@ -1179,9 +1608,9 @@ impl LinkImporter for MangaFireImporter {
                 page_count: None,
                 selected: Some(chapter.id) == selected_chapter_id,
             })
-            .collect();
-        let mut volumes = resolved
-            .summaries
+            .collect::<Vec<_>>();
+        let volumes = catalog
+            .volumes
             .iter()
             .map(|volume| ImportVolume {
                 id: volume.id,
@@ -1189,42 +1618,244 @@ impl LinkImporter for MangaFireImporter {
                 name: clean_string(&volume.name),
                 language: volume.language.clone(),
                 chapter_count: Some(volume.chapter_count),
-                page_count: (volume.id == selected_id).then_some(resolved.volume.pages.len()),
-                selected: volume.id == selected_id,
+                page_count: None,
+                selected: Some(volume.id) == selected_volume_id,
             })
             .collect::<Vec<_>>();
-        if volumes.is_empty() {
-            volumes.push(ImportVolume {
-                id: resolved.volume.id,
-                number: resolved.volume.number,
-                name: clean_string(&resolved.volume.name),
-                language: resolved.volume.language.clone(),
-                chapter_count: None,
-                page_count: Some(resolved.volume.pages.len()),
-                selected: true,
-            });
+        let mut available_scopes = Vec::new();
+        if !chapters.is_empty() {
+            available_scopes.push(ImportScope::Chapter);
         }
+        if !volumes.is_empty() {
+            available_scopes.push(ImportScope::Volume);
+        }
+        available_scopes.push(ImportScope::Series);
         Ok(ImportPreview {
             provider: self.provider().to_owned(),
-            title: resolved.title.title,
-            source_url: resolved.target.source_url.to_string(),
-            eligibility_url: resolved.proof.url.to_string(),
-            eligibility_status: resolved.proof.status,
+            title: catalog.title.title,
+            source_url: catalog.target.source_url.to_string(),
+            eligibility_url: catalog.proof.url.to_string(),
+            eligibility_status: catalog.proof.status,
             eligible: true,
             warning: IMPORT_WARNING.to_owned(),
             volumes,
             chapters,
-            selected_volume_id: Some(selected_id),
+            selected_volume_id,
             selected_chapter_id,
-            estimated_page_count: Some(resolved.volume.pages.len()),
-            series_chapter_count: Some(series_chapter_count),
-            series_page_count,
-            available_scopes: vec![
-                ImportScope::Chapter,
-                ImportScope::Volume,
-                ImportScope::Series,
-            ],
+            estimated_page_count: None,
+            series_chapter_count: Some(catalog.chapters.len()),
+            series_page_count: None,
+            available_scopes,
         })
+    }
+
+    async fn resolve_online(
+        &self,
+        source: &str,
+        options: &ImportOptions,
+    ) -> Result<RemotePublication> {
+        let catalog = self
+            .catalog(
+                source,
+                (options.scope == ImportScope::Volume)
+                    .then_some(options.volume_id)
+                    .flatten(),
+                options.preferred_language.as_deref(),
+            )
+            .await?;
+        let provider = self.provider().to_owned();
+        let source_url = catalog.target.source_url.to_string();
+        let eligibility_url = catalog.proof.url.to_string();
+        let eligibility_status = catalog.proof.status;
+        let title = catalog.title.title.clone();
+        let language = Some(catalog.language.clone());
+        let mut active_chapter_id = options.chapter_id;
+        let mut active_volume_id = options.volume_id.or(catalog.target.volume_id);
+        let selected_chapters = if options.selected_chapter_ids.is_empty() {
+            catalog.chapters.clone()
+        } else {
+            let selected = options
+                .selected_chapter_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let filtered = catalog
+                .chapters
+                .iter()
+                .filter(|chapter| selected.contains(&chapter.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if filtered.len() != selected.len() {
+                return Err(KomaError::ImportDenied(
+                    "one or more selected chapters do not belong to this series".to_owned(),
+                ));
+            }
+            filtered
+        };
+
+        // Online reading resolves a catalog plus one active section. Adjacent
+        // sections are fetched only when the reader enters them.
+        let chapters = match options.scope {
+            ImportScope::Chapter => {
+                let selected_id = options
+                    .chapter_id
+                    .or_else(|| catalog.chapters.last().map(|chapter| chapter.id))
+                    .ok_or_else(|| {
+                        KomaError::ProviderChanged(
+                            "this language exposes no official chapters".to_owned(),
+                        )
+                    })?;
+                active_chapter_id = Some(selected_id);
+                let summary = catalog
+                    .chapters
+                    .iter()
+                    .find(|chapter| chapter.id == selected_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        KomaError::ImportDenied(
+                            "the selected chapter is not exposed for this language".to_owned(),
+                        )
+                    })?;
+                let chapter = self
+                    .load_official_chapter(&catalog.target.hid, &catalog.language, summary)
+                    .await?;
+                vec![remote_mangafire_chapter(chapter, None)]
+            }
+            ImportScope::Series => {
+                if let Some(summary) = selected_chapters.first().cloned() {
+                    active_chapter_id = Some(summary.id);
+                    let chapter = self
+                        .load_official_chapter(&catalog.target.hid, &catalog.language, summary)
+                        .await?;
+                    vec![remote_mangafire_chapter(chapter, None)]
+                } else {
+                    let selected_id = active_volume_id
+                        .or_else(|| catalog.volumes.first().map(|volume| volume.id))
+                        .ok_or_else(|| {
+                            KomaError::ProviderChanged(
+                                "this title exposes no readable chapters or volumes".to_owned(),
+                            )
+                        })?;
+                    active_volume_id = Some(selected_id);
+                    let volume = self.load_volume(&catalog.target.hid, selected_id).await?;
+                    vec![remote_mangafire_volume(volume)]
+                }
+            }
+            ImportScope::Volume => {
+                let selected_id = active_volume_id
+                    .or_else(|| catalog.volumes.first().map(|volume| volume.id))
+                    .ok_or_else(|| {
+                        KomaError::ProviderChanged(
+                            "this title does not expose any readable volumes".to_owned(),
+                        )
+                    })?;
+                active_volume_id = Some(selected_id);
+                vec![remote_mangafire_volume(
+                    self.load_volume(&catalog.target.hid, selected_id).await?,
+                )]
+            }
+        };
+        let mut allowed_page_hosts = chapters
+            .iter()
+            .flat_map(|chapter| chapter.pages.iter())
+            .filter_map(|page| Url::parse(&page.url).ok())
+            .filter_map(|url| url.host_str().map(str::to_ascii_lowercase))
+            .collect::<Vec<_>>();
+        allowed_page_hosts.sort();
+        allowed_page_hosts.dedup();
+        Ok(RemotePublication {
+            provider,
+            source_url,
+            eligibility_url,
+            eligibility_status,
+            title,
+            language,
+            scope: options.scope,
+            volume_id: active_volume_id,
+            chapter_id: active_chapter_id,
+            selected_chapter_ids: options.selected_chapter_ids.clone(),
+            chapters,
+            chapter_catalog: selected_chapters
+                .iter()
+                .map(remote_chapter_navigation)
+                .collect(),
+            volume_catalog: catalog
+                .volumes
+                .iter()
+                .filter(|volume| volume.language.eq_ignore_ascii_case(&catalog.language))
+                .map(remote_volume_navigation)
+                .collect(),
+            allowed_page_hosts,
+            allow_local_network: false,
+        })
+    }
+
+    async fn navigate_online(
+        &self,
+        publication: &RemotePublication,
+        target_scope: ImportScope,
+        target_id: u64,
+    ) -> Result<RemotePublication> {
+        let target = self.parse_target(&publication.source_url)?;
+        let mut next = publication.clone();
+        next.chapters = match target_scope {
+            ImportScope::Chapter => {
+                let item = publication
+                    .chapter_catalog
+                    .iter()
+                    .find(|item| item.id == target_id)
+                    .ok_or_else(|| {
+                        KomaError::ImportDenied(
+                            "the selected chapter is not exposed by this title".to_owned(),
+                        )
+                    })?;
+                let chapter = self
+                    .load_official_chapter(
+                        &target.hid,
+                        &item.language,
+                        MangaFireChapterSummary {
+                            id: item.id,
+                            number: item.number,
+                            name: item.title.clone().unwrap_or_default(),
+                            language: item.language.clone(),
+                            release_type: "official".to_owned(),
+                        },
+                    )
+                    .await?;
+                next.chapter_id = Some(target_id);
+                vec![remote_mangafire_chapter(chapter, None)]
+            }
+            ImportScope::Volume => {
+                if !publication
+                    .volume_catalog
+                    .iter()
+                    .any(|item| item.id == target_id)
+                {
+                    return Err(KomaError::ImportDenied(
+                        "the selected volume is not exposed by this title".to_owned(),
+                    ));
+                }
+                next.volume_id = Some(target_id);
+                vec![remote_mangafire_volume(
+                    self.load_volume(&target.hid, target_id).await?,
+                )]
+            }
+            ImportScope::Series => {
+                return Err(KomaError::Other(
+                    "choose a chapter or volume to open".to_owned(),
+                ));
+            }
+        };
+        next.allowed_page_hosts = next
+            .chapters
+            .iter()
+            .flat_map(|chapter| chapter.pages.iter())
+            .filter_map(|page| Url::parse(&page.url).ok())
+            .filter_map(|url| url.host_str().map(str::to_ascii_lowercase))
+            .collect();
+        next.allowed_page_hosts.sort();
+        next.allowed_page_hosts.dedup();
+        Ok(next)
     }
 
     async fn import(
@@ -1233,6 +1864,25 @@ impl LinkImporter for MangaFireImporter {
         options: &ImportOptions,
         events: Option<&UnboundedSender<ImportEvent>>,
     ) -> Result<ImportReceipt> {
+        if options.scope == ImportScope::Chapter {
+            let catalog = self
+                .catalog(source, None, options.preferred_language.as_deref())
+                .await?;
+            return self
+                .import_chapter(Self::resolved_from_catalog(catalog), options, events)
+                .await;
+        }
+        if options.scope == ImportScope::Series {
+            let catalog = self
+                .catalog(source, None, options.preferred_language.as_deref())
+                .await?;
+            if catalog.chapters.is_empty() {
+                return self.import_volume_series(catalog, options, events).await;
+            }
+            return self
+                .import_series(Self::resolved_from_catalog(catalog), options, events)
+                .await;
+        }
         let resolved = self
             .resolve(
                 source,
@@ -1242,15 +1892,10 @@ impl LinkImporter for MangaFireImporter {
             )
             .await?;
 
-        match options.scope {
-            ImportScope::Chapter => {
-                return self.import_chapter(resolved, options, events).await;
-            }
-            ImportScope::Series => {
-                return self.import_series(resolved, options, events).await;
-            }
-            ImportScope::Volume => {}
-        }
+        let chapter_ranges = self
+            .volume_chapter_ranges(&resolved)
+            .await
+            .unwrap_or_default();
 
         // No destination directory or page file exists until every guarded
         // provider request above has succeeded.
@@ -1401,9 +2046,16 @@ impl LinkImporter for MangaFireImporter {
             },
         );
         let comic_info = comic_info(&resolved);
+        let koma_metadata =
+            (!chapter_ranges.is_empty()).then(|| KomaArchiveMetadata::new(chapter_ranges));
         let package_path = output_path.clone();
         tokio::task::spawn_blocking(move || {
-            ZipPublication::write_cbz_from_files(&package_path, downloaded, &comic_info)
+            ZipPublication::write_cbz_from_files_with_metadata(
+                &package_path,
+                downloaded,
+                &comic_info,
+                koma_metadata.as_ref(),
+            )
         })
         .await
         .map_err(|error| KomaError::Other(format!("CBZ packaging task failed: {error}")))??;
@@ -1435,6 +2087,61 @@ impl LinkImporter for MangaFireImporter {
     }
 }
 
+fn remote_mangafire_chapter(chapter: ResolvedChapter, volume: Option<f64>) -> RemoteChapter {
+    RemoteChapter {
+        id: Some(chapter.chapter.id.to_string()),
+        number: chapter.number,
+        title: clean_string(&chapter.name),
+        volume,
+        pages: chapter
+            .chapter
+            .pages
+            .into_iter()
+            .map(remote_mangafire_page)
+            .collect(),
+    }
+}
+
+fn remote_mangafire_volume(volume: MangaFireVolume) -> RemoteChapter {
+    RemoteChapter {
+        id: Some(format!("volume:{}", volume.id)),
+        number: volume.number,
+        title: clean_string(&volume.name),
+        volume: Some(volume.number),
+        pages: volume
+            .pages
+            .into_iter()
+            .map(remote_mangafire_page)
+            .collect(),
+    }
+}
+
+fn remote_chapter_navigation(chapter: &MangaFireChapterSummary) -> RemoteNavigationItem {
+    RemoteNavigationItem {
+        id: chapter.id,
+        number: chapter.number,
+        title: clean_string(&chapter.name),
+        language: chapter.language.clone(),
+    }
+}
+
+fn remote_volume_navigation(volume: &MangaFireVolumeSummary) -> RemoteNavigationItem {
+    RemoteNavigationItem {
+        id: volume.id,
+        number: volume.number,
+        title: clean_string(&volume.name),
+        language: volume.language.clone(),
+    }
+}
+
+fn remote_mangafire_page(page: MangaFirePage) -> RemotePage {
+    RemotePage {
+        url: page.url,
+        width: positive(page.width),
+        height: positive(page.height),
+    }
+}
+
 #[derive(Debug)]
 struct MangaFireTarget {
     hid: String,
@@ -1455,7 +2162,16 @@ struct ResolvedImport {
     proof: EligibilityProof,
     title: MangaFireTitle,
     volume: MangaFireVolume,
-    summaries: Vec<MangaFireVolumeSummary>,
+}
+
+#[derive(Debug)]
+struct MangaFireCatalog {
+    target: MangaFireTarget,
+    proof: EligibilityProof,
+    title: MangaFireTitle,
+    language: String,
+    volumes: Vec<MangaFireVolumeSummary>,
+    chapters: Vec<MangaFireChapterSummary>,
 }
 
 #[derive(Debug)]
@@ -1524,6 +2240,8 @@ struct MangaFireChapter {
 struct MangaFireTitle {
     hid: String,
     title: String,
+    #[serde(default)]
+    languages: Vec<String>,
     #[serde(default)]
     synopsis_html: String,
     #[serde(default)]
@@ -2025,9 +2743,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ImportOptions, LinkImporter, MangaFireImporter, MangaFirePage, MangaFireVolume,
-        MangaFireVolumeSummary, compatible_page_geometry, is_non_public_ip, select_volume,
-        unique_contiguous_page_range, validate_page_url,
+        ImportOptions, ImportScope, LinkImporter, MangaFireImporter, MangaFirePage,
+        MangaFireVolume, MangaFireVolumeSummary, compatible_page_geometry, is_non_public_ip,
+        select_volume, unique_contiguous_page_range, validate_page_url,
     };
     use crate::error::KomaError;
 
@@ -2249,5 +2967,289 @@ mod tests {
                 .iter()
                 .all(|request| request.starts_with("GET /api/test "))
         );
+    }
+
+    #[tokio::test]
+    async fn online_series_opens_one_chapter_from_a_large_chapter_only_catalog() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..6 {
+                let (mut connection, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let count = connection.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..count]).into_owned();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                requests.push(path.clone());
+                let body = if path == "/api/titles/abc" {
+                    r#"{"data":{"hid":"abc","title":"Lazy proof"}}"#.to_owned()
+                } else if path == "/api/titles/abc/volumes" {
+                    r#"{"items":[]}"#.to_owned()
+                } else if path.starts_with("/api/titles/abc/chapters?") {
+                    let items = (1..=250)
+                        .map(|id| {
+                            format!(
+                                r#"{{"id":{id},"number":{id},"name":"","language":"en","type":"official"}}"#
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!(r#"{{"items":[{items}],"meta":{{"lastPage":1}}}}"#)
+                } else if path == "/api/chapters/1" || path == "/api/chapters/2" {
+                    let id = if path.ends_with("/2") { 2 } else { 1 };
+                    format!(
+                        r#"{{"data":{{"id":{id},"language":"en","pages":[{{"url":"https://l1n.mfcdn2.xyz/page-{id}.jpg","width":800,"height":1200}}],"title":{{"hid":"abc"}}}}}}"#
+                    )
+                } else {
+                    "ok".to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                connection
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+            requests
+        });
+        let origin = url::Url::parse(&format!("http://{address}/")).expect("origin");
+        let importer = MangaFireImporter::with_test_origin(origin).expect("importer");
+        let mut options = ImportOptions::new(tempdir().expect("temp").path());
+        options.scope = ImportScope::Series;
+        options.preferred_language = Some("en".to_owned());
+        let publication = importer
+            .resolve_online(&format!("http://{address}/title/abc-lazy-proof"), &options)
+            .await
+            .expect("online publication");
+        assert_eq!(publication.chapter_catalog.len(), 250);
+        assert_eq!(publication.chapters.len(), 1);
+        assert_eq!(publication.chapter_id, Some(1));
+        assert_eq!(publication.page_count(), 1);
+        let next = importer
+            .navigate_online(&publication, ImportScope::Chapter, 2)
+            .await
+            .expect("next chapter");
+        assert_eq!(next.chapter_id, Some(2));
+        assert_eq!(next.chapters[0].number, 2.0);
+        let requests = server.join().expect("server thread");
+        assert_eq!(requests.len(), 6);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|path| path.starts_with("/api/chapters/"))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn chapter_scope_uses_the_chapter_language_not_an_unrelated_volume() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..9 {
+                let (mut connection, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let count = connection.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..count]).into_owned();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                requests.push(path.clone());
+                let body = if path == "/api/titles/multi" {
+                    r#"{"data":{"hid":"multi","title":"Multilingual proof"}}"#.to_owned()
+                } else if path == "/api/titles/multi/volumes" {
+                    r#"{"items":[{"id":10,"number":1,"name":"","language":"ja","chapterCount":1},{"id":20,"number":1,"name":"","language":"en","chapterCount":1}]}"#.to_owned()
+                } else if path.starts_with("/api/titles/multi/chapters?") {
+                    let language = if path.contains("language=ja") {
+                        "ja"
+                    } else {
+                        "en"
+                    };
+                    let id = if language == "ja" { 100 } else { 200 };
+                    format!(
+                        r#"{{"items":[{{"id":{id},"number":1,"name":"","language":"{language}","type":"official"}}],"meta":{{"lastPage":1}}}}"#
+                    )
+                } else if path == "/api/chapters/200" {
+                    r#"{"data":{"id":200,"language":"en","pages":[{"url":"https://l1n.mfcdn2.xyz/page-en.jpg","width":800,"height":1200}],"title":{"hid":"multi"}}}"#.to_owned()
+                } else {
+                    "ok".to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                connection
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+            requests
+        });
+        let origin = url::Url::parse(&format!("http://{address}/")).expect("origin");
+        let importer = MangaFireImporter::with_test_origin(origin).expect("importer");
+        let source = format!("http://{address}/title/multi-language-proof");
+
+        let preview = importer.preview(&source).await.expect("preview");
+        assert_eq!(preview.selected_volume_id, Some(20));
+        assert_eq!(preview.selected_chapter_id, Some(200));
+
+        let mut options = ImportOptions::new(tempdir().expect("temp").path());
+        options.scope = ImportScope::Chapter;
+        options.volume_id = Some(10);
+        options.chapter_id = Some(200);
+        options.preferred_language = Some("en".to_owned());
+        let publication = importer
+            .resolve_online(&source, &options)
+            .await
+            .expect("English chapter remains readable");
+        assert_eq!(publication.language.as_deref(), Some("en"));
+        assert_eq!(publication.chapter_id, Some(200));
+        assert_eq!(publication.chapters[0].number, 1.0);
+
+        let requests = server.join().expect("server thread");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|path| path.contains("language=ja"))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn online_series_falls_back_to_volumes_when_chapters_are_absent() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..5 {
+                let (mut connection, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let count = connection.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..count]).into_owned();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                requests.push(path.clone());
+                let body = if path == "/api/titles/volumes" {
+                    r#"{"data":{"hid":"volumes","title":"Volume-only proof"}}"#.to_owned()
+                } else if path == "/api/titles/volumes/volumes" {
+                    r#"{"items":[{"id":90,"number":1,"name":"","language":"en","chapterCount":0}]}"#
+                        .to_owned()
+                } else if path.starts_with("/api/titles/volumes/chapters?") {
+                    r#"{"items":[],"meta":{"lastPage":1}}"#.to_owned()
+                } else if path == "/api/volumes/90" {
+                    r#"{"data":{"id":90,"number":1,"name":"","language":"en","pages":[{"url":"https://l1n.mfcdn2.xyz/volume-page.jpg","width":800,"height":1200}],"title":{"hid":"volumes"}}}"#.to_owned()
+                } else {
+                    "ok".to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                connection
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+            requests
+        });
+        let origin = url::Url::parse(&format!("http://{address}/")).expect("origin");
+        let importer = MangaFireImporter::with_test_origin(origin).expect("importer");
+        let mut options = ImportOptions::new(tempdir().expect("temp").path());
+        options.scope = ImportScope::Series;
+        options.preferred_language = Some("en".to_owned());
+        let publication = importer
+            .resolve_online(
+                &format!("http://{address}/title/volumes-only-proof"),
+                &options,
+            )
+            .await
+            .expect("volume-only series remains readable");
+        assert_eq!(publication.scope, ImportScope::Series);
+        assert_eq!(publication.volume_id, Some(90));
+        assert_eq!(publication.chapter_id, None);
+        assert_eq!(publication.chapter_catalog.len(), 0);
+        assert_eq!(publication.volume_catalog.len(), 1);
+        assert_eq!(publication.page_count(), 1);
+        assert_eq!(publication.chapters[0].volume, Some(1.0));
+        assert_eq!(server.join().expect("server thread").len(), 5);
+    }
+
+    #[tokio::test]
+    async fn chapter_only_title_uses_an_available_language_when_english_is_absent() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..5 {
+                let (mut connection, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let count = connection.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..count]).into_owned();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                requests.push(path.clone());
+                let body = if path == "/api/titles/japanese" {
+                    r#"{"data":{"hid":"japanese","title":"Japanese proof","languages":["ja"]}}"#
+                        .to_owned()
+                } else if path == "/api/titles/japanese/volumes" {
+                    r#"{"items":[]}"#.to_owned()
+                } else if path.starts_with("/api/titles/japanese/chapters?") {
+                    r#"{"items":[{"id":700,"number":0.5,"name":"","language":"ja","type":"official"}],"meta":{"lastPage":1}}"#.to_owned()
+                } else if path == "/api/chapters/700" {
+                    r#"{"data":{"id":700,"language":"ja","pages":[{"url":"https://l1n.mfcdn2.xyz/japanese-page.jpg","width":800,"height":1200}],"title":{"hid":"japanese"}}}"#.to_owned()
+                } else {
+                    "ok".to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                connection
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+            requests
+        });
+        let origin = url::Url::parse(&format!("http://{address}/")).expect("origin");
+        let importer = MangaFireImporter::with_test_origin(origin).expect("importer");
+        let mut options = ImportOptions::new(tempdir().expect("temp").path());
+        options.scope = ImportScope::Series;
+        options.preferred_language = Some("en".to_owned());
+        let publication = importer
+            .resolve_online(
+                &format!("http://{address}/title/japanese-only-proof"),
+                &options,
+            )
+            .await
+            .expect("available provider language is selected");
+        assert_eq!(publication.language.as_deref(), Some("ja"));
+        assert_eq!(publication.chapter_id, Some(700));
+        assert_eq!(publication.chapters[0].number, 0.5);
+        let requests = server.join().expect("server thread");
+        assert!(requests.iter().any(|path| path.contains("language=ja")));
+        assert!(requests.iter().all(|path| !path.contains("language=en")));
     }
 }
