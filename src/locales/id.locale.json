@@ -528,6 +528,17 @@
     "Try again": "Coba lagi",
     "Original selection": "Pilihan awal",
     "Current chapter": "Bab saat ini",
-    "Resize publication tools": "Ubah ukuran alat publikasi"
+    "Resize publication tools": "Ubah ukuran alat publikasi",
+    "Cancel download": "Batalkan unduhan",
+    "Cancelling…": "Membatalkan…",
+    "Checking source…": "Memeriksa sumber…",
+    "Download cancelled": "Unduhan dibatalkan",
+    "Download progress": "Progres unduhan",
+    "Downloads": "Unduhan",
+    "Finishing download…": "Menyelesaikan unduhan…",
+    "Getting pages ready…": "Menyiapkan halaman…",
+    "Preparing download": "Menyiapkan unduhan",
+    "Retrying {{count}} pages": "Mencoba ulang {{count}} halaman",
+    "{{completed}} of {{total}} pages": "{{completed}} dari {{total}} halaman"
   }
 }

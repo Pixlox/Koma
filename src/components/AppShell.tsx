@@ -193,6 +193,7 @@ export function AppShell() {
   const items = useKomaStore((state) => state.items);
   const search = useKomaStore((state) => state.search);
   const selectedId = useKomaStore((state) => state.selectedId);
+  const readerOpen = useKomaStore((state) => state.reader !== null);
   const sidebarOpen = useKomaStore((state) => state.sidebarOpen);
   const sortMode = useKomaStore((state) => state.sortMode);
   const setSidebarOpen = useKomaStore((state) => state.setSidebarOpen);
@@ -214,7 +215,11 @@ export function AppShell() {
   };
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      aria-hidden={readerOpen || undefined}
+      inert={readerOpen || undefined}
+    >
       <Sidebar open={sidebarOpen} />
       {sidebarOpen && (
         <button

@@ -528,6 +528,17 @@
     "Try again": "Повторить",
     "Original selection": "Исходный выбор",
     "Current chapter": "Текущая глава",
-    "Resize publication tools": "Изменить размер инструментов публикации"
+    "Resize publication tools": "Изменить размер инструментов публикации",
+    "Cancel download": "Отменить загрузку",
+    "Cancelling…": "Отмена…",
+    "Checking source…": "Проверка источника…",
+    "Download cancelled": "Загрузка отменена",
+    "Download progress": "Ход загрузки",
+    "Downloads": "Загрузки",
+    "Finishing download…": "Завершение загрузки…",
+    "Getting pages ready…": "Подготовка страниц…",
+    "Preparing download": "Подготовка загрузки",
+    "Retrying {{count}} pages": "Повторная загрузка {{count}} стр.",
+    "{{completed}} of {{total}} pages": "{{completed}} из {{total}} стр."
   }
 }

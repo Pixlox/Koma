@@ -1262,6 +1262,7 @@ function ReaderToolbar({
             type="button"
             className="reader-download-button"
             onClick={onDownload}
+            aria-label={tr("Download to library")}
             title={tr("Download to library")}
           >
             <Download size={17} />

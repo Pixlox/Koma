@@ -528,6 +528,17 @@
     "Try again": "Thử lại",
     "Original selection": "Lựa chọn ban đầu",
     "Current chapter": "Chương hiện tại",
-    "Resize publication tools": "Đổi kích thước công cụ ấn phẩm"
+    "Resize publication tools": "Đổi kích thước công cụ ấn phẩm",
+    "Cancel download": "Hủy tải xuống",
+    "Cancelling…": "Đang hủy…",
+    "Checking source…": "Đang kiểm tra nguồn…",
+    "Download cancelled": "Đã hủy tải xuống",
+    "Download progress": "Tiến trình tải xuống",
+    "Downloads": "Tải xuống",
+    "Finishing download…": "Đang hoàn tất tải xuống…",
+    "Getting pages ready…": "Đang chuẩn bị trang…",
+    "Preparing download": "Đang chuẩn bị tải xuống",
+    "Retrying {{count}} pages": "Đang thử lại {{count}} trang",
+    "{{completed}} of {{total}} pages": "{{completed}} trên {{total}} trang"
   }
 }

@@ -528,6 +528,17 @@
     "Try again": "Réessayer",
     "Original selection": "Sélection d’origine",
     "Current chapter": "Chapitre actuel",
-    "Resize publication tools": "Redimensionner les outils de la publication"
+    "Resize publication tools": "Redimensionner les outils de la publication",
+    "Cancel download": "Annuler le téléchargement",
+    "Cancelling…": "Annulation…",
+    "Checking source…": "Vérification de la source…",
+    "Download cancelled": "Téléchargement annulé",
+    "Download progress": "Progression du téléchargement",
+    "Downloads": "Téléchargements",
+    "Finishing download…": "Finalisation du téléchargement…",
+    "Getting pages ready…": "Préparation des pages…",
+    "Preparing download": "Préparation du téléchargement",
+    "Retrying {{count}} pages": "Nouvelle tentative pour {{count}} pages",
+    "{{completed}} of {{total}} pages": "{{completed}} pages sur {{total}}"
   }
 }

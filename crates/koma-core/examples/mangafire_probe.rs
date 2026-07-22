@@ -1,7 +1,8 @@
 use std::{collections::BTreeSet, env, path::PathBuf};
 
 use koma_core::{
-    ImportEvent, ImportOptions, ImportScope, LinkImporter, MangaFireImporter, open_publication,
+    ImportEvent, ImportOptions, ImportScope, LinkImporter, MangaFireImporter, fetch_remote_page,
+    open_publication,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -17,7 +18,7 @@ struct SampledPage {
 
 fn usage() -> anyhow::Error {
     anyhow::anyhow!(
-        "usage:\n  cargo run -p koma-core --example mangafire_probe -- preview <MangaFire URL>\n  cargo run -p koma-core --example mangafire_probe -- download <MangaFire URL> <destination directory>\n  cargo run -p koma-core --example mangafire_probe -- download-chapter <MangaFire URL> <chapter id> <destination directory>\n  cargo run -p koma-core --example mangafire_probe -- download-series <MangaFire URL> <destination directory>"
+        "usage:\n  cargo run -p koma-core --example mangafire_probe -- preview <MangaFire URL>\n  cargo run -p koma-core --example mangafire_probe -- read-chapter <MangaFire URL> <chapter id>\n  cargo run -p koma-core --example mangafire_probe -- read-volume <MangaFire URL> <volume id>\n  cargo run -p koma-core --example mangafire_probe -- read-series <MangaFire URL>\n  cargo run -p koma-core --example mangafire_probe -- download <MangaFire URL> <destination directory>\n  cargo run -p koma-core --example mangafire_probe -- download-chapter <MangaFire URL> <chapter id> <destination directory>\n  cargo run -p koma-core --example mangafire_probe -- download-series <MangaFire URL> <destination directory>"
     )
 }
 
@@ -35,6 +36,58 @@ async fn main() -> anyhow::Result<()> {
             }
             let preview = importer.preview(&source).await?;
             println!("{}", serde_json::to_string_pretty(&preview)?);
+        }
+        "read-chapter" | "read-volume" | "read-series" => {
+            let selected_id = if command == "read-series" {
+                None
+            } else {
+                Some(
+                    arguments
+                        .next()
+                        .ok_or_else(usage)?
+                        .parse::<u64>()
+                        .map_err(|_| usage())?,
+                )
+            };
+            if arguments.next().is_some() {
+                return Err(usage());
+            }
+            let mut options = ImportOptions::new(PathBuf::new());
+            options.scope = match command.as_str() {
+                "read-chapter" => {
+                    options.chapter_id = selected_id;
+                    ImportScope::Chapter
+                }
+                "read-volume" => {
+                    options.volume_id = selected_id;
+                    ImportScope::Volume
+                }
+                _ => ImportScope::Series,
+            };
+            let publication = importer.resolve_online(&source, &options).await?;
+            let first = fetch_remote_page(&publication, 0).await?;
+            let last_index = publication.page_count().saturating_sub(1);
+            let last = if last_index == 0 {
+                None
+            } else {
+                Some(fetch_remote_page(&publication, last_index).await?)
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "scope": publication.scope,
+                    "title": publication.title,
+                    "language": publication.language,
+                    "volumeId": publication.volume_id,
+                    "chapterId": publication.chapter_id,
+                    "loadedChapters": publication.chapters.len(),
+                    "availableChapters": publication.chapter_catalog.len(),
+                    "availableVolumes": publication.volume_catalog.len(),
+                    "pageCount": publication.page_count(),
+                    "firstPage": { "mimeType": first.mime_type, "byteSize": first.bytes.len() },
+                    "lastPage": last.map(|page| json!({ "mimeType": page.mime_type, "byteSize": page.bytes.len() })),
+                }))?
+            );
         }
         "download" | "download-chapter" | "download-series" => {
             let chapter_id = if command == "download-chapter" {

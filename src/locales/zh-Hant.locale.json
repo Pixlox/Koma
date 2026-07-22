@@ -528,6 +528,17 @@
     "Try again": "再試一次",
     "Original selection": "原始選取範圍",
     "Current chapter": "目前章節",
-    "Resize publication tools": "調整出版物工具大小"
+    "Resize publication tools": "調整出版物工具大小",
+    "Cancel download": "取消下載",
+    "Cancelling…": "正在取消…",
+    "Checking source…": "正在檢查來源…",
+    "Download cancelled": "下載已取消",
+    "Download progress": "下載進度",
+    "Downloads": "下載",
+    "Finishing download…": "正在完成下載…",
+    "Getting pages ready…": "正在準備頁面…",
+    "Preparing download": "正在準備下載",
+    "Retrying {{count}} pages": "正在重試 {{count}} 頁",
+    "{{completed}} of {{total}} pages": "{{total}} 頁中的第 {{completed}} 頁"
   }
 }

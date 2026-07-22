@@ -528,6 +528,17 @@
     "Try again": "ลองอีกครั้ง",
     "Original selection": "ขอบเขตที่เลือกไว้เดิม",
     "Current chapter": "ตอนปัจจุบัน",
-    "Resize publication tools": "ปรับขนาดเครื่องมือสิ่งพิมพ์"
+    "Resize publication tools": "ปรับขนาดเครื่องมือสิ่งพิมพ์",
+    "Cancel download": "ยกเลิกการดาวน์โหลด",
+    "Cancelling…": "กำลังยกเลิก…",
+    "Checking source…": "กำลังตรวจสอบแหล่งที่มา…",
+    "Download cancelled": "ยกเลิกการดาวน์โหลดแล้ว",
+    "Download progress": "ความคืบหน้าการดาวน์โหลด",
+    "Downloads": "ดาวน์โหลด",
+    "Finishing download…": "กำลังเสร็จสิ้นการดาวน์โหลด…",
+    "Getting pages ready…": "กำลังเตรียมหน้า…",
+    "Preparing download": "กำลังเตรียมการดาวน์โหลด",
+    "Retrying {{count}} pages": "กำลังลองใหม่ {{count}} หน้า",
+    "{{completed}} of {{total}} pages": "{{completed}} จาก {{total}} หน้า"
   }
 }

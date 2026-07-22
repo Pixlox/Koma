@@ -602,8 +602,17 @@ impl MangaFireImporter {
                     .iter()
                     .find(|volume| volume.language.eq_ignore_ascii_case(preferred_language))
             })
-            .or_else(|| volumes.first())
             .map(|volume| volume.language.clone())
+            .or_else(|| {
+                title_response
+                    .data
+                    .languages
+                    .iter()
+                    .find(|language| language.eq_ignore_ascii_case(preferred_language))
+                    .cloned()
+            })
+            .or_else(|| volumes.first().map(|volume| volume.language.clone()))
+            .or_else(|| title_response.data.languages.first().cloned())
             .unwrap_or_else(|| preferred_language.to_owned());
         let chapters = self
             .chapter_summaries(&target.hid, &language, false)
@@ -1580,6 +1589,13 @@ impl LinkImporter for MangaFireImporter {
         let selected_volume_id = catalog
             .target
             .volume_id
+            .or_else(|| {
+                catalog
+                    .volumes
+                    .iter()
+                    .find(|volume| volume.language.eq_ignore_ascii_case(&catalog.language))
+                    .map(|volume| volume.id)
+            })
             .or_else(|| catalog.volumes.first().map(|volume| volume.id));
         let selected_chapter_id = catalog.chapters.last().map(|chapter| chapter.id);
         let chapters = catalog
@@ -1642,7 +1658,9 @@ impl LinkImporter for MangaFireImporter {
         let catalog = self
             .catalog(
                 source,
-                options.volume_id,
+                (options.scope == ImportScope::Volume)
+                    .then_some(options.volume_id)
+                    .flatten(),
                 options.preferred_language.as_deref(),
             )
             .await?;
@@ -1849,11 +1867,7 @@ impl LinkImporter for MangaFireImporter {
     ) -> Result<ImportReceipt> {
         if options.scope == ImportScope::Chapter {
             let catalog = self
-                .catalog(
-                    source,
-                    options.volume_id,
-                    options.preferred_language.as_deref(),
-                )
+                .catalog(source, None, options.preferred_language.as_deref())
                 .await?;
             return self
                 .import_chapter(Self::resolved_from_catalog(catalog), options, events)
@@ -1861,11 +1875,7 @@ impl LinkImporter for MangaFireImporter {
         }
         if options.scope == ImportScope::Series {
             let catalog = self
-                .catalog(
-                    source,
-                    options.volume_id,
-                    options.preferred_language.as_deref(),
-                )
+                .catalog(source, None, options.preferred_language.as_deref())
                 .await?;
             if catalog.chapters.is_empty() {
                 return self.import_volume_series(catalog, options, events).await;
@@ -2231,6 +2241,8 @@ struct MangaFireChapter {
 struct MangaFireTitle {
     hid: String,
     title: String,
+    #[serde(default)]
+    languages: Vec<String>,
     #[serde(default)]
     synopsis_html: String,
     #[serde(default)]
@@ -3037,5 +3049,208 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn chapter_scope_uses_the_chapter_language_not_an_unrelated_volume() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..9 {
+                let (mut connection, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let count = connection.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..count]).into_owned();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                requests.push(path.clone());
+                let body = if path == "/api/titles/multi" {
+                    r#"{"data":{"hid":"multi","title":"Multilingual proof"}}"#.to_owned()
+                } else if path == "/api/titles/multi/volumes" {
+                    r#"{"items":[{"id":10,"number":1,"name":"","language":"ja","chapterCount":1},{"id":20,"number":1,"name":"","language":"en","chapterCount":1}]}"#.to_owned()
+                } else if path.starts_with("/api/titles/multi/chapters?") {
+                    let language = if path.contains("language=ja") {
+                        "ja"
+                    } else {
+                        "en"
+                    };
+                    let id = if language == "ja" { 100 } else { 200 };
+                    format!(
+                        r#"{{"items":[{{"id":{id},"number":1,"name":"","language":"{language}","type":"official"}}],"meta":{{"lastPage":1}}}}"#
+                    )
+                } else if path == "/api/chapters/200" {
+                    r#"{"data":{"id":200,"language":"en","pages":[{"url":"https://l1n.mfcdn2.xyz/page-en.jpg","width":800,"height":1200}],"title":{"hid":"multi"}}}"#.to_owned()
+                } else {
+                    "ok".to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                connection
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+            requests
+        });
+        let origin = url::Url::parse(&format!("http://{address}/")).expect("origin");
+        let importer = MangaFireImporter::with_test_origin(origin).expect("importer");
+        let source = format!("http://{address}/title/multi-language-proof");
+
+        let preview = importer.preview(&source).await.expect("preview");
+        assert_eq!(preview.selected_volume_id, Some(20));
+        assert_eq!(preview.selected_chapter_id, Some(200));
+
+        let mut options = ImportOptions::new(tempdir().expect("temp").path());
+        options.scope = ImportScope::Chapter;
+        options.volume_id = Some(10);
+        options.chapter_id = Some(200);
+        options.preferred_language = Some("en".to_owned());
+        let publication = importer
+            .resolve_online(&source, &options)
+            .await
+            .expect("English chapter remains readable");
+        assert_eq!(publication.language.as_deref(), Some("en"));
+        assert_eq!(publication.chapter_id, Some(200));
+        assert_eq!(publication.chapters[0].number, 1.0);
+
+        let requests = server.join().expect("server thread");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|path| path.contains("language=ja"))
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn online_series_falls_back_to_volumes_when_chapters_are_absent() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..5 {
+                let (mut connection, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let count = connection.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..count]).into_owned();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                requests.push(path.clone());
+                let body = if path == "/api/titles/volumes" {
+                    r#"{"data":{"hid":"volumes","title":"Volume-only proof"}}"#.to_owned()
+                } else if path == "/api/titles/volumes/volumes" {
+                    r#"{"items":[{"id":90,"number":1,"name":"","language":"en","chapterCount":0}]}"#
+                        .to_owned()
+                } else if path.starts_with("/api/titles/volumes/chapters?") {
+                    r#"{"items":[],"meta":{"lastPage":1}}"#.to_owned()
+                } else if path == "/api/volumes/90" {
+                    r#"{"data":{"id":90,"number":1,"name":"","language":"en","pages":[{"url":"https://l1n.mfcdn2.xyz/volume-page.jpg","width":800,"height":1200}],"title":{"hid":"volumes"}}}"#.to_owned()
+                } else {
+                    "ok".to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                connection
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+            requests
+        });
+        let origin = url::Url::parse(&format!("http://{address}/")).expect("origin");
+        let importer = MangaFireImporter::with_test_origin(origin).expect("importer");
+        let mut options = ImportOptions::new(tempdir().expect("temp").path());
+        options.scope = ImportScope::Series;
+        options.preferred_language = Some("en".to_owned());
+        let publication = importer
+            .resolve_online(
+                &format!("http://{address}/title/volumes-only-proof"),
+                &options,
+            )
+            .await
+            .expect("volume-only series remains readable");
+        assert_eq!(publication.scope, ImportScope::Series);
+        assert_eq!(publication.volume_id, Some(90));
+        assert_eq!(publication.chapter_id, None);
+        assert_eq!(publication.chapter_catalog.len(), 0);
+        assert_eq!(publication.volume_catalog.len(), 1);
+        assert_eq!(publication.page_count(), 1);
+        assert_eq!(publication.chapters[0].volume, Some(1.0));
+        assert_eq!(server.join().expect("server thread").len(), 5);
+    }
+
+    #[tokio::test]
+    async fn chapter_only_title_uses_an_available_language_when_english_is_absent() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        let address = listener.local_addr().expect("fixture address");
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..5 {
+                let (mut connection, _) = listener.accept().expect("accept request");
+                let mut request = [0_u8; 8192];
+                let count = connection.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..count]).into_owned();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default()
+                    .to_owned();
+                requests.push(path.clone());
+                let body = if path == "/api/titles/japanese" {
+                    r#"{"data":{"hid":"japanese","title":"Japanese proof","languages":["ja"]}}"#
+                        .to_owned()
+                } else if path == "/api/titles/japanese/volumes" {
+                    r#"{"items":[]}"#.to_owned()
+                } else if path.starts_with("/api/titles/japanese/chapters?") {
+                    r#"{"items":[{"id":700,"number":0.5,"name":"","language":"ja","type":"official"}],"meta":{"lastPage":1}}"#.to_owned()
+                } else if path == "/api/chapters/700" {
+                    r#"{"data":{"id":700,"language":"ja","pages":[{"url":"https://l1n.mfcdn2.xyz/japanese-page.jpg","width":800,"height":1200}],"title":{"hid":"japanese"}}}"#.to_owned()
+                } else {
+                    "ok".to_owned()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                connection
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+            requests
+        });
+        let origin = url::Url::parse(&format!("http://{address}/")).expect("origin");
+        let importer = MangaFireImporter::with_test_origin(origin).expect("importer");
+        let mut options = ImportOptions::new(tempdir().expect("temp").path());
+        options.scope = ImportScope::Series;
+        options.preferred_language = Some("en".to_owned());
+        let publication = importer
+            .resolve_online(
+                &format!("http://{address}/title/japanese-only-proof"),
+                &options,
+            )
+            .await
+            .expect("available provider language is selected");
+        assert_eq!(publication.language.as_deref(), Some("ja"));
+        assert_eq!(publication.chapter_id, Some(700));
+        assert_eq!(publication.chapters[0].number, 0.5);
+        let requests = server.join().expect("server thread");
+        assert!(requests.iter().any(|path| path.contains("language=ja")));
+        assert!(requests.iter().all(|path| !path.contains("language=en")));
     }
 }

@@ -69,6 +69,7 @@ export function ImportPanel() {
     bootstrap?.defaultImportDirectory ?? "~/Downloads/Koma",
   );
   const [confirmed, setConfirmed] = useState(false);
+  const [readingOnline, setReadingOnline] = useState(false);
   const [phase, setPhase] = useState<ImportPhase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState>({
@@ -152,15 +153,13 @@ export function ImportPanel() {
   }, [progress]);
   const seriesChapters = useMemo(() => {
     if (preview === null) return [];
-    const language =
-      preview.volumes.find((volume) => volume.id === selectedVolume)
-        ?.language ??
-      preview.chapters.find((chapter) => chapter.id === selectedChapter)
-        ?.language;
+    const language = preview.chapters.find(
+      (chapter) => chapter.id === selectedChapter,
+    )?.language;
     return language === undefined
       ? preview.chapters
       : preview.chapters.filter((chapter) => chapter.language === language);
-  }, [preview, selectedChapter, selectedVolume]);
+  }, [preview, selectedChapter]);
   const seriesUsesVolumes =
     preview !== null &&
     preview.chapters.length === 0 &&
@@ -259,16 +258,19 @@ export function ImportPanel() {
     setError(null);
     const options = {
       destinationDirectory: destination,
-      volumeId: selectedVolume,
-      chapterId: selectedChapter,
+      volumeId: scope === "volume" ? selectedVolume : null,
+      chapterId: scope === "chapter" ? selectedChapter : null,
       selectedChapterIds: scope === "series" ? [...selectedSeriesChapters] : [],
       scope,
       preferredLanguage:
-        (scope === "chapter"
-          ? preview.chapters.find((chapter) => chapter.id === selectedChapter)
+        (scope === "volume"
+          ? preview.volumes.find((volume) => volume.id === selectedVolume)
               ?.language
-          : preview.volumes.find((volume) => volume.id === selectedVolume)
-              ?.language) ?? "en",
+          : preview.chapters.find((chapter) => chapter.id === selectedChapter)
+              ?.language ?? preview.chapters[0]?.language) ??
+        preview.volumes.find((volume) => volume.id === selectedVolume)
+          ?.language ??
+        "en",
       overwriteExisting: false,
       downloadConcurrency: 6,
     };
@@ -333,22 +335,26 @@ export function ImportPanel() {
 
   const importOptions = () => ({
     destinationDirectory: destination,
-    volumeId: selectedVolume,
-    chapterId: selectedChapter,
+    volumeId: scope === "volume" ? selectedVolume : null,
+    chapterId: scope === "chapter" ? selectedChapter : null,
     selectedChapterIds: scope === "series" ? [...selectedSeriesChapters] : [],
     scope,
     preferredLanguage:
-      (scope === "chapter"
-        ? preview?.chapters.find((chapter) => chapter.id === selectedChapter)
+      (scope === "volume"
+        ? preview?.volumes.find((volume) => volume.id === selectedVolume)
             ?.language
-        : preview?.volumes.find((volume) => volume.id === selectedVolume)
-            ?.language) ?? "en",
+        : preview?.chapters.find((chapter) => chapter.id === selectedChapter)
+            ?.language ?? preview?.chapters[0]?.language) ??
+      preview?.volumes.find((volume) => volume.id === selectedVolume)
+        ?.language ??
+      "en",
     overwriteExisting: false,
     downloadConcurrency: 6,
   });
 
   const readOnline = async () => {
     if (preview === null || !confirmed) return;
+    setReadingOnline(true);
     setPhase("checking");
     setError(null);
     try {
@@ -360,6 +366,8 @@ export function ImportPanel() {
     } catch (caught) {
       setPhase("error");
       setError(errorMessage(caught));
+    } finally {
+      setReadingOnline(false);
     }
   };
 
@@ -766,6 +774,7 @@ export function ImportPanel() {
                     type="button"
                     className="secondary-button"
                     onClick={() => void readOnline()}
+                    aria-busy={readingOnline}
                     disabled={
                       !confirmed ||
                       (scope === "volume" && selectedVolume === null) ||
@@ -778,7 +787,11 @@ export function ImportPanel() {
                       phase === "checking"
                     }
                   >
-                    <BookOpen size={17} />
+                    {readingOnline ? (
+                      <LoaderCircle className="spin" size={17} />
+                    ) : (
+                      <BookOpen size={17} />
+                    )}
                     {tr("Read online")}
                   </button>
                   <button
