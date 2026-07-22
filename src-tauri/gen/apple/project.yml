@@ -87,8 +87,8 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 0.1.4
-        CFBundleVersion: "0.1.4"
+        CFBundleShortVersionString: 0.2.0
+        CFBundleVersion: "0.2.0"
     entitlements:
       path: koma_iOS/koma_iOS.entitlements
     scheme:
