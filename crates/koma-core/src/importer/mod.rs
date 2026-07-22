@@ -509,12 +509,11 @@ impl MangaFireImporter {
                     "this title does not expose any downloadable volumes".to_owned(),
                 ));
             }
-            let selected = select_volume(
+            select_volume(
                 &response.items,
                 requested_volume_id,
                 preferred_language.unwrap_or("en"),
-            )?;
-            selected
+            )?
         };
 
         let volume_url = self.api_url(&format!("volumes/{selected_id}"))?;
