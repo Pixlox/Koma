@@ -113,6 +113,7 @@ interface KomaState {
   navigateOnline: (
     targetScope: "chapter" | "volume",
     targetId: number,
+    initialPage?: "first" | "last",
   ) => Promise<boolean>;
   relinkItem: (item: LibraryItem) => Promise<void>;
   openBook: (item: LibraryItem) => Promise<void>;
@@ -910,7 +911,7 @@ export const useKomaStore = create<KomaState>((set, get) => ({
     }
   },
 
-  navigateOnline: async (targetScope, targetId) => {
+  navigateOnline: async (targetScope, targetId, initialPage = "first") => {
     const reader = get().reader;
     if (reader?.payload.onlineSource == null) return false;
     try {
@@ -919,7 +920,9 @@ export const useKomaStore = create<KomaState>((set, get) => ({
         targetScope,
         targetId,
       );
-      const page = await backend.readPage(reader.payload.libraryId, 0);
+      const pageIndex =
+        initialPage === "last" ? result.reader.manifest.pages.length - 1 : 0;
+      const page = await backend.readPage(reader.payload.libraryId, pageIndex);
       set((state) => ({
         items: replaceItem(state.items, result.item),
         reader:
@@ -927,8 +930,8 @@ export const useKomaStore = create<KomaState>((set, get) => ({
             ? {
                 ...state.reader,
                 payload: result.reader,
-                currentPage: 0,
-                pageUrls: { 0: page.dataUrl },
+                currentPage: pageIndex,
+                pageUrls: { [pageIndex]: page.dataUrl },
                 loadingPages: [],
                 bookmarks: result.reader.bookmarks,
                 error: null,
@@ -936,8 +939,11 @@ export const useKomaStore = create<KomaState>((set, get) => ({
               }
             : state.reader,
       }));
-      const next = result.reader.manifest.pages.length > 1 ? 1 : null;
-      if (next !== null) void get().loadPage(next);
+      const adjacent =
+        initialPage === "last" ? pageIndex - 1 : pageIndex + 1;
+      if (adjacent >= 0 && adjacent < result.reader.manifest.pages.length) {
+        void get().loadPage(adjacent);
+      }
       return true;
     } catch (error) {
       get().notify(tr("Could not open section"), errorMessage(error), "danger");

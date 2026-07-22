@@ -52,6 +52,8 @@ export interface LibraryItem {
   pageCount: number;
   currentPage: number;
   currentChapter: number | null;
+  mangaFireChapterIndex: number | null;
+  mangaFireChapterCount: number | null;
   progress: number;
   totalReadingSeconds: number;
   isCompleted: boolean;
@@ -174,6 +176,7 @@ export interface RemotePublication {
   volumeCatalog: RemoteNavigationItem[];
   allowedPageHosts: string[];
   allowLocalNetwork: boolean;
+  coverUrl?: string | null;
 }
 
 export interface OnlineNavigationResult {

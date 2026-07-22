@@ -15,9 +15,9 @@ use koma_core::{
     ImportScope, KomaError, Library, LibraryBackup, LibraryFolder, LibraryItem, LibraryScanReport,
     LinkImporter, MangaFireImporter, PageData, PublicationFormat, PublicationInspection,
     PublicationManifest, PublicationMetadata, PublicationReader, ReaderSettings, ReadingState,
-    RemotePublication, bundled_mangafire_summary, convert_to_cbz, fetch_remote_page,
-    formats::with_metadata, inspect_publication as inspect_path, open_publication, repair_to_cbz,
-    write_publication_metadata,
+    RemotePublication, bundled_mangafire_summary, convert_to_cbz, fetch_remote_cover,
+    fetch_remote_page, formats::with_metadata, inspect_publication as inspect_path,
+    open_publication, repair_to_cbz, write_publication_metadata,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -1481,10 +1481,17 @@ async fn read_link_online(
 ) -> Result<LibraryItem, CommandError> {
     let importer = state.importer_for(&source)?;
     let publication = importer.resolve_online(&source, &options).await?;
-    let cover = cached_online_page(&state.online_cache_directory, &publication, 0)
-        .await
-        .ok()
-        .and_then(|page| Library::thumbnail_data_url(&page.bytes).ok());
+    let cover = if publication.provider == "MangaFire" {
+        fetch_remote_cover(&publication)
+            .await
+            .ok()
+            .and_then(|page| Library::thumbnail_data_url(&page.bytes).ok())
+    } else {
+        cached_online_page(&state.online_cache_directory, &publication, 0)
+            .await
+            .ok()
+            .and_then(|page| Library::thumbnail_data_url(&page.bytes).ok())
+    };
     let item = state.library.add_online(&publication, cover.as_deref())?;
     let _ = app.emit("koma://library-changed", ());
     Ok(item)

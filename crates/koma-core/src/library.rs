@@ -231,13 +231,15 @@ impl Library {
             fingerprint,
             modified_at: None,
         };
-        let item = self.upsert_manifest(&manifest, cover_data_url)?;
+        self.upsert_manifest(&manifest, cover_data_url)?;
         let connection = self.lock()?;
         connection.execute(
             "INSERT OR REPLACE INTO online_sources (publication_id, source_json, updated_at) VALUES (?1, ?2, ?3)",
             params![id.to_string(), to_json(publication)?, Utc::now().to_rfc3339()],
         )?;
-        Ok(item)
+        item_by_id(&connection, id)?.ok_or_else(|| {
+            KomaError::Other("the online publication was not found after saving".to_owned())
+        })
     }
 
     pub fn online_source(&self, publication_id: Uuid) -> Result<Option<RemotePublication>> {
@@ -799,12 +801,19 @@ impl Library {
                 items.push(item_from_row(row)?);
             }
         }
+        for item in &mut items {
+            apply_mangafire_chapter_progress(&connection, item)?;
+        }
         Ok(items)
     }
 
     pub fn get(&self, id: Uuid) -> Result<Option<LibraryItem>> {
         let connection = self.lock()?;
-        item_by_id(&connection, id)
+        let mut item = item_by_id(&connection, id)?;
+        if let Some(item) = &mut item {
+            apply_mangafire_chapter_progress(&connection, item)?;
+        }
+        Ok(item)
     }
 
     pub fn remove(&self, id: Uuid) -> Result<bool> {
@@ -991,12 +1000,24 @@ impl Library {
             .ok_or_else(|| KomaError::Other("publication is not in the library".to_owned()))?;
         let page_count = usize::try_from(page_count.max(0)).unwrap_or(0);
         let bounded_page = current_page.min(page_count.saturating_sub(1));
-        let progress = if page_count <= 1 {
+        let page_progress = if page_count <= 1 {
             if page_count == 0 { 0.0 } else { 1.0 }
         } else {
             bounded_page as f64 / (page_count - 1) as f64
         };
         let completed = page_count > 0 && bounded_page + 1 >= page_count;
+        let online_source = transaction
+            .query_row(
+                "SELECT source_json FROM online_sources WHERE publication_id = ?1",
+                params![publication_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| from_json::<RemotePublication>(&json))
+            .transpose()?;
+        let progress = manga_fire_chapter_progress(online_source.as_ref())
+            .map(|(index, count)| index as f64 / count as f64)
+            .unwrap_or(page_progress);
         let chapters: Vec<ChapterRange> = from_json(&chapters_json)?;
         let current_chapter = chapter_at_page(&chapters, bounded_page);
         let now = Utc::now();
@@ -1863,6 +1884,8 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> Result<LibraryItem> {
         page_count,
         current_page: current_page.min(page_count.saturating_sub(1)),
         current_chapter: row.get(17)?,
+        manga_fire_chapter_index: None,
+        manga_fire_chapter_count: None,
         progress: row.get::<_, f64>(9)?.clamp(0.0, 1.0),
         total_reading_seconds: u64::try_from(row.get::<_, i64>(18)?.max(0)).unwrap_or(0),
         is_completed: row.get(10)?,
@@ -1876,6 +1899,36 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> Result<LibraryItem> {
             .map(|value| parse_datetime(&value))
             .transpose()?,
     })
+}
+
+fn manga_fire_chapter_progress(publication: Option<&RemotePublication>) -> Option<(usize, usize)> {
+    let publication = publication?;
+    if publication.provider != "MangaFire" || publication.chapter_catalog.is_empty() {
+        return None;
+    }
+    let chapter_id = publication.chapter_id?;
+    let index = publication
+        .chapter_catalog
+        .iter()
+        .position(|chapter| chapter.id == chapter_id)?;
+    Some((index + 1, publication.chapter_catalog.len()))
+}
+
+fn apply_mangafire_chapter_progress(connection: &Connection, item: &mut LibraryItem) -> Result<()> {
+    let source = connection
+        .query_row(
+            "SELECT source_json FROM online_sources WHERE publication_id = ?1",
+            params![item.id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| from_json::<RemotePublication>(&json))
+        .transpose()?;
+    if let Some((index, count)) = manga_fire_chapter_progress(source.as_ref()) {
+        item.manga_fire_chapter_index = Some(index);
+        item.manga_fire_chapter_count = Some(count);
+    }
+    Ok(())
 }
 
 fn chapter_at_page(chapters: &[ChapterRange], page_index: usize) -> Option<f64> {
@@ -1964,7 +2017,9 @@ mod tests {
     use super::Library;
     use crate::{
         formats::ZipPublication,
-        importer::{ImportScope, RemoteChapter, RemotePage, RemotePublication},
+        importer::{
+            ImportScope, RemoteChapter, RemoteNavigationItem, RemotePage, RemotePublication,
+        },
         metadata::ComicInfo,
         model::{ChapterRange, KomaArchiveMetadata, PublicationFormat, ReadingDirection},
     };
@@ -2009,6 +2064,7 @@ mod tests {
             volume_catalog: Vec::new(),
             allowed_page_hosts: vec!["images.reader.example".to_owned()],
             allow_local_network: false,
+            cover_url: None,
         }
     }
 
@@ -2055,6 +2111,45 @@ mod tests {
         assert!(!library.get(item.id).expect("get").expect("item").is_missing);
         let backup = library.export_backup().expect("backup");
         assert_eq!(backup.online_sources.len(), 1);
+    }
+
+    #[test]
+    fn mangafire_online_progress_tracks_chapter_position() {
+        let library = Library::in_memory().expect("library");
+        let mut publication = remote_publication();
+        publication.provider = "MangaFire".to_owned();
+        publication.chapter_id = Some(20);
+        publication.chapter_catalog = vec![
+            RemoteNavigationItem {
+                id: 10,
+                number: 1.0,
+                title: None,
+                language: "en".to_owned(),
+            },
+            RemoteNavigationItem {
+                id: 20,
+                number: 2.0,
+                title: None,
+                language: "en".to_owned(),
+            },
+            RemoteNavigationItem {
+                id: 30,
+                number: 3.0,
+                title: None,
+                language: "en".to_owned(),
+            },
+        ];
+        let item = library
+            .add_online(&publication, None)
+            .expect("online publication");
+        let reading = library
+            .save_progress(item.id, 0, None)
+            .expect("save progress");
+        assert!((reading.progress - 2.0 / 3.0).abs() < f64::EPSILON);
+
+        let item = library.get(item.id).expect("lookup").expect("item");
+        assert_eq!(item.manga_fire_chapter_index, Some(2));
+        assert_eq!(item.manga_fire_chapter_count, Some(3));
     }
 
     #[test]
