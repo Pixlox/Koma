@@ -6,6 +6,8 @@ use std::{
 
 use chrono::Utc;
 use keyring::Entry;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use keyring_core::set_default_store;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -369,7 +371,7 @@ impl TrackingService {
     }
 
     pub fn disconnect(&self, provider: TrackingProvider) -> Result<(), String> {
-        if let Ok(entry) = Entry::new(KEYRING_SERVICE, provider.key()) {
+        if let Ok(entry) = token_entry(provider) {
             let _ = entry.delete_credential();
         }
         let mut config = self
@@ -528,8 +530,7 @@ impl TrackingService {
     }
 
     fn token_bundle(&self, provider: TrackingProvider) -> Result<StoredToken, String> {
-        let stored = Entry::new(KEYRING_SERVICE, provider.key())
-            .map_err(|error| error.to_string())?
+        let stored = token_entry(provider)?
             .get_password()
             .map_err(|error| error.to_string())?;
         Ok(serde_json::from_str(&stored).unwrap_or(StoredToken {
@@ -541,8 +542,7 @@ impl TrackingService {
 
     fn store_token(&self, provider: TrackingProvider, token: &StoredToken) -> Result<(), String> {
         let encoded = serde_json::to_string(token).map_err(|error| error.to_string())?;
-        Entry::new(KEYRING_SERVICE, provider.key())
-            .map_err(|error| error.to_string())?
+        token_entry(provider)?
             .set_password(&encoded)
             .map_err(|error| format!("could not store the OAuth token securely: {error}"))
     }
@@ -950,6 +950,27 @@ impl TrackingService {
             updated_at: entry["updated_at"].as_str().map(str::to_owned),
         })
     }
+}
+
+fn initialize_secure_store() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let store = android_native_keyring_store::Store::new()
+            .map_err(|error| format!("could not initialize Android secure storage: {error}"))?;
+        set_default_store(store);
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let store = apple_native_keyring_store::protected::Store::new()
+            .map_err(|error| format!("could not initialize iOS secure storage: {error}"))?;
+        set_default_store(store);
+    }
+    Ok(())
+}
+
+fn token_entry(provider: TrackingProvider) -> Result<Entry, String> {
+    initialize_secure_store()?;
+    Entry::new(KEYRING_SERVICE, provider.key()).map_err(|error| error.to_string())
 }
 
 async fn parse_mal_token_response(

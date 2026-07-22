@@ -241,6 +241,10 @@ pub struct LibraryItem {
     pub current_page: usize,
     #[serde(default)]
     pub current_chapter: Option<f64>,
+    #[serde(default)]
+    pub manga_fire_chapter_index: Option<usize>,
+    #[serde(default)]
+    pub manga_fire_chapter_count: Option<usize>,
     pub progress: f64,
     #[serde(default)]
     pub total_reading_seconds: u64,

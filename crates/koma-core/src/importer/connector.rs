@@ -739,6 +739,7 @@ impl LinkImporter for DeclarativeImporter {
             },
             allowed_page_hosts: self.manifest.allowed_page_hosts.clone(),
             allow_local_network: self.manifest.allow_local_network,
+            cover_url: None,
         })
     }
 

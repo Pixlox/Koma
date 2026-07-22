@@ -247,14 +247,45 @@ export function Reader() {
       : resolvedDirection(reader.settings.direction, manifest.metadata.direction);
   const isRtl = direction === "rightToLeft";
 
-  const openOnlineSection = async (index: number) => {
+  const openOnlineSection = async (
+    index: number,
+    initialPage: "first" | "last" = "first",
+  ) => {
     const target = onlineSections[index];
     if (target === undefined || sectionLoading) return;
     setSectionLoading(true);
     try {
-      await navigateOnline(onlineSectionKind, target.id);
+      await navigateOnline(onlineSectionKind, target.id, initialPage);
     } finally {
       setSectionLoading(false);
+    }
+  };
+
+  const prevChapterOrSection = () => {
+    if (onlineSections.length > 1 && activeOnlineSectionIndex > 0) {
+      void openOnlineSection(activeOnlineSectionIndex - 1, "last");
+    } else if (currentChapterIndex > 0 && manifest !== null) {
+      const prev = manifest.chapters[currentChapterIndex - 1];
+      if (prev !== undefined) {
+        setGuidedStep(0);
+        void goToPage(prev.endPageIndex);
+      }
+    }
+  };
+
+  const nextChapterOrSection = () => {
+    if (onlineSections.length > 1 && activeOnlineSectionIndex < onlineSections.length - 1) {
+      void openOnlineSection(activeOnlineSectionIndex + 1);
+    } else if (
+      manifest !== null &&
+      currentChapterIndex >= 0 &&
+      currentChapterIndex < manifest.chapters.length - 1
+    ) {
+      const next = manifest.chapters[currentChapterIndex + 1];
+      if (next !== undefined) {
+        setGuidedStep(0);
+        void goToPage(next.startPageIndex);
+      }
     }
   };
 
@@ -270,8 +301,16 @@ export function Reader() {
     if (readerMode === "spreads" && manifest !== null) {
       const groups = spreadGroups(manifest.pages);
       const index = spreadIndexForPage(groups, reader.currentPage);
+      if (index === 0) {
+        prevChapterOrSection();
+        return;
+      }
       const target = groups[Math.max(0, index - 1)]?.[0];
       if (target !== undefined) void goToPage(target);
+      return;
+    }
+    if (reader.currentPage <= 0) {
+      prevChapterOrSection();
       return;
     }
     void goToPage(reader.currentPage - 1);
@@ -286,13 +325,20 @@ export function Reader() {
     if (readerMode === "spreads" && manifest !== null) {
       const groups = spreadGroups(manifest.pages);
       const index = spreadIndexForPage(groups, reader.currentPage);
+      if (index >= groups.length - 1) {
+        nextChapterOrSection();
+        return;
+      }
       const target = groups[Math.min(groups.length - 1, index + 1)]?.[0];
       if (target !== undefined) void goToPage(target);
       return;
     }
+    if (reader.currentPage >= pageCount - 1) {
+      nextChapterOrSection();
+      return;
+    }
     void goToPage(reader.currentPage + 1);
   };
-
   const scheduleHide = () => {
     if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
     if (reader !== null && !reader.settingsOpen) {

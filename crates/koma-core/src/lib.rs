@@ -15,7 +15,7 @@ pub use importer::{
     ConnectorCapability, ConnectorKind, ConnectorManifest, ConnectorSummary, DeclarativeImporter,
     ImportChapter, ImportEvent, ImportOptions, ImportPreview, ImportScope, ImportVolume,
     LinkImporter, MangaFireImporter, RemoteChapter, RemoteNavigationItem, RemotePage,
-    RemotePublication, bundled_mangafire_summary, fetch_remote_page,
+    RemotePublication, bundled_mangafire_summary, fetch_remote_cover, fetch_remote_page,
 };
 pub use library::{
     BackupRestoreReport, Library, LibraryBackup, LibraryFolder, LibraryScanFailure,

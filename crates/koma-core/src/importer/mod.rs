@@ -137,6 +137,8 @@ pub struct RemotePublication {
     pub allowed_page_hosts: Vec<String>,
     #[serde(default)]
     pub allow_local_network: bool,
+    #[serde(default)]
+    pub cover_url: Option<String>,
 }
 
 pub async fn fetch_remote_page(
@@ -149,6 +151,31 @@ pub async fn fetch_remote_page(
         .flat_map(|chapter| chapter.pages.iter())
         .nth(page_index)
         .ok_or(KomaError::PageOutOfRange { index: page_index })?;
+    fetch_remote_image(publication, page, page_index).await
+}
+
+pub async fn fetch_remote_cover(publication: &RemotePublication) -> Result<PageData> {
+    let url = publication
+        .cover_url
+        .as_ref()
+        .ok_or_else(|| KomaError::PageOutOfRange { index: 0 })?;
+    fetch_remote_image(
+        publication,
+        &RemotePage {
+            url: url.clone(),
+            width: None,
+            height: None,
+        },
+        0,
+    )
+    .await
+}
+
+async fn fetch_remote_image(
+    publication: &RemotePublication,
+    page: &RemotePage,
+    page_index: usize,
+) -> Result<PageData> {
     let url = Url::parse(&page.url)?;
     if (url.scheme() != "https" && !(publication.allow_local_network && url.scheme() == "http"))
         || url.username() != ""
@@ -1755,12 +1782,23 @@ impl LinkImporter for MangaFireImporter {
                 )]
             }
         };
+        let cover_url = catalog
+            .title
+            .poster
+            .as_ref()
+            .map(|poster| poster.large.clone());
         let mut allowed_page_hosts = chapters
             .iter()
             .flat_map(|chapter| chapter.pages.iter())
             .filter_map(|page| Url::parse(&page.url).ok())
             .filter_map(|url| url.host_str().map(str::to_ascii_lowercase))
             .collect::<Vec<_>>();
+        if let Some(url) = cover_url.as_deref()
+            && let Ok(url) = Url::parse(url)
+            && let Some(host) = url.host_str()
+        {
+            allowed_page_hosts.push(host.to_ascii_lowercase());
+        }
         allowed_page_hosts.sort();
         allowed_page_hosts.dedup();
         Ok(RemotePublication {
@@ -1787,6 +1825,7 @@ impl LinkImporter for MangaFireImporter {
                 .collect(),
             allowed_page_hosts,
             allow_local_network: false,
+            cover_url,
         })
     }
 
@@ -2237,6 +2276,12 @@ struct MangaFireChapter {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct MangaFirePoster {
+    large: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MangaFireTitle {
     hid: String,
     title: String,
@@ -2244,6 +2289,8 @@ struct MangaFireTitle {
     languages: Vec<String>,
     #[serde(default)]
     synopsis_html: String,
+    #[serde(default)]
+    poster: Option<MangaFirePoster>,
     #[serde(default)]
     authors: Vec<NamedValue>,
     #[serde(default)]
@@ -2988,7 +3035,7 @@ mod tests {
                     .to_owned();
                 requests.push(path.clone());
                 let body = if path == "/api/titles/abc" {
-                    r#"{"data":{"hid":"abc","title":"Lazy proof"}}"#.to_owned()
+                    r#"{"data":{"hid":"abc","title":"Lazy proof","poster":{"large":"https://static.mfcdn.nl/cover.jpg"}}}"#.to_owned()
                 } else if path == "/api/titles/abc/volumes" {
                     r#"{"items":[]}"#.to_owned()
                 } else if path.starts_with("/api/titles/abc/chapters?") {
@@ -3032,6 +3079,15 @@ mod tests {
         assert_eq!(publication.chapter_catalog.len(), 250);
         assert_eq!(publication.chapters.len(), 1);
         assert_eq!(publication.chapter_id, Some(1));
+        assert_eq!(
+            publication.cover_url.as_deref(),
+            Some("https://static.mfcdn.nl/cover.jpg")
+        );
+        assert!(
+            publication
+                .allowed_page_hosts
+                .contains(&"static.mfcdn.nl".to_owned())
+        );
         assert_eq!(publication.page_count(), 1);
         let next = importer
             .navigate_online(&publication, ImportScope::Chapter, 2)
@@ -3039,6 +3095,7 @@ mod tests {
             .expect("next chapter");
         assert_eq!(next.chapter_id, Some(2));
         assert_eq!(next.chapters[0].number, 2.0);
+        assert_eq!(next.page_count(), 1);
         let requests = server.join().expect("server thread");
         assert_eq!(requests.len(), 6);
         assert_eq!(

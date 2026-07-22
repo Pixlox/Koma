@@ -105,6 +105,22 @@ function formatProgress(progress: number): string {
   return `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
 }
 
+function progressPosition(item: LibraryItem): string {
+  if (
+    item.mangaFireChapterIndex !== null &&
+    item.mangaFireChapterCount !== null
+  ) {
+    return tr("Chapter {{current}} of {{total}}", {
+      current: item.mangaFireChapterIndex,
+      total: item.mangaFireChapterCount,
+    });
+  }
+  return tr("Page {{current}} of {{total}}", {
+    current: Math.min(item.currentPage + 1, item.pageCount),
+    total: item.pageCount,
+  });
+}
+
 function formatReadingTime(seconds: number): string {
   if (seconds < 60) return tr("Less than a minute");
   const hours = Math.floor(seconds / 3600);
@@ -524,10 +540,7 @@ function HomeView({ items }: { items: LibraryItem[] }) {
           <h2 id="continue-heading">{featured.title}</h2>
           <p>
             {featured.progress > 0
-              ? `${tr("Page {{current}} of {{total}}", {
-                  current: featured.currentPage + 1,
-                  total: featured.pageCount,
-                })} · ${formatProgress(featured.progress)}`
+              ? `${progressPosition(featured)} · ${formatProgress(featured.progress)}`
               : `${tr("{{count}} pages", {
                   count: featured.pageCount,
                 })} · ${FORMAT_LABELS[featured.format]}`}
@@ -863,7 +876,7 @@ function BookRow({ item }: { item: LibraryItem }) {
       <div className="row-progress">
         <span>
           {item.progress > 0
-            ? `${item.currentPage + 1} / ${item.pageCount}`
+            ? progressPosition(item)
             : tr("{{count}} pages", { count: item.pageCount })}
         </span>
         <div>
@@ -1057,10 +1070,7 @@ function DetailInspector({ item }: { item: LibraryItem }) {
           <span style={{ width: formatProgress(item.progress) }} />
         </div>
         <small>
-          {tr("Page {{current}} of {{total}}", {
-            current: Math.min(item.currentPage + 1, item.pageCount),
-            total: item.pageCount,
-          })}
+          {progressPosition(item)}
         </small>
       </div>
       <dl className="inspector-facts">

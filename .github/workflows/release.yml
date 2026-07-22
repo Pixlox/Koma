@@ -36,6 +36,9 @@ jobs:
             os: macos-15
             target: x86_64-apple-darwin
             bundles: app,dmg
+          - name: Android APK
+            os: ubuntu-22.04
+            mobile: android
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -81,6 +84,27 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Set up Java for Android
+        if: matrix.mobile == 'android'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        if: matrix.mobile == 'android'
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Android NDK
+        if: matrix.mobile == 'android'
+        shell: bash
+        run: |
+          sdkmanager --install "ndk;29.0.13846066"
+          ndk_path="$ANDROID_SDK_ROOT/ndk/29.0.13846066"
+          echo "ANDROID_NDK_HOME=$ndk_path" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ndk_path" >> "$GITHUB_ENV"
+          echo "$ndk_path/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.93.0
@@ -90,12 +114,17 @@ jobs:
 
       - run: npm ci
 
+      - name: Initialize Android project
+        if: matrix.mobile == 'android'
+        run: npm run tauri -- android init --ci
+
       - name: Validate release metadata
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: npm run release:check
 
       - name: Prepare updater signing key
+        if: matrix.mobile != 'android'
         shell: bash
         env:
           KOMA_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -106,7 +135,8 @@ jobs:
           chmod 600 "$key_file"
           echo "TAURI_SIGNING_PRIVATE_KEY=$key_file" >> "$GITHUB_ENV"
 
-      - name: Build and attach installers
+      - name: Build and attach desktop installers
+        if: matrix.mobile != 'android'
         uses: tauri-apps/tauri-action@action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -128,3 +158,26 @@ jobs:
           uploadUpdaterSignatures: true
           uploadWorkflowArtifacts: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Build and attach Android APK
+        if: matrix.mobile == 'android'
+        uses: tauri-apps/tauri-action@action-v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KOMA_ANILIST_CLIENT_ID: ${{ secrets.KOMA_ANILIST_CLIENT_ID }}
+          KOMA_MAL_CLIENT_ID: ${{ secrets.KOMA_MAL_CLIENT_ID }}
+          KOMA_MAL_CLIENT_SECRET: ${{ secrets.KOMA_MAL_CLIENT_SECRET }}
+        with:
+          projectPath: .
+          tagName: ${{ github.ref_name }}
+          releaseName: "Koma ${{ github.ref_name }}"
+          releaseBody: "Native installers and updater metadata are attached below."
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: true
+          retryAttempts: 2
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          uploadWorkflowArtifacts: false
+          mobile: android
+          args: --apk

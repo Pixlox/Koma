@@ -164,6 +164,8 @@ function seededItems(): LibraryItem[] {
       pageCount: seed.pages,
       currentPage: seed.current,
       currentChapter: null,
+      mangaFireChapterIndex: null,
+      mangaFireChapterCount: null,
       progress,
       totalReadingSeconds: seed.current * 35,
       isCompleted: progress >= 1,
@@ -358,8 +360,9 @@ export function demoOpenPayload(item: LibraryItem): ReaderOpenPayload {
               { id: 103, number: 3, title: "Afterward", language: "en" },
             ],
             volumeCatalog: [],
-            allowedPageHosts: ["l1n.mfcdn2.xyz"],
+            allowedPageHosts: ["l1n.mfcdn2.xyz", "static.mfcdn.nl"],
             allowLocalNetwork: false,
+            coverUrl: "https://static.mfcdn.nl/0dee/i/d/d2/d264750a4e86f15a6bc373a4cec0b658.jpg",
           }
         : null,
   };
